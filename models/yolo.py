@@ -1,3 +1,4 @@
+import time
 import argparse
 import logging
 import sys
@@ -579,6 +580,7 @@ class Model(nn.Module):
         logger.info('')
 
     def forward(self, x, augment=False, profile=False):
+        print('x shape:{}'.format(x.shape))
         if augment:
             img_size = x.shape[-2:]  # height, width
             s = [1, 0.83, 0.67]  # scales
@@ -599,8 +601,13 @@ class Model(nn.Module):
             return self.forward_once(x, profile)  # single-scale inference, train
 
     def forward_once(self, x, profile=False):
+        print('forward_once x shape:{}'.format(x.shape))
         y, dt = [], []  # outputs
-        for m in self.model:
+        backbone_layer_idx=[i for i in range(51)]
+        backbone_layer_compute_time=0
+        head_compute_time=0
+        total_ops=0
+        for i,m in enumerate(self.model):
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
 
@@ -620,14 +627,25 @@ class Model(nn.Module):
                 for _ in range(10):
                     m(x.copy() if c else x)
                 dt.append((time_synchronized() - t) * 100)
-                print('%10.1f%10.0f%10.1fms %-40s' % (o, m.np, dt[-1], m.type))
+                print('%10.1f%10.1f%10.0f%10.1fms %-40s' % (i,o, m.np, dt[-1], m.type))
+                total_ops+=o
 
+            t0=time.time()
             x = m(x)  # run
-            
+            t1=time.time()
+            if i in backbone_layer_idx:
+                backbone_layer_compute_time +=(t1-t0)
+            else:
+                head_compute_time +=(t1-t0)
             y.append(x if m.i in self.save else None)  # save output
 
         if profile:
             print('%.1fms total' % sum(dt))
+        
+
+        print('backbone_layer_compute_time:{}'.format(backbone_layer_compute_time))
+        print('head_compute_time:{}'.format(head_compute_time))
+        print('total ops:{}GFLOPS'.format(total_ops))
         return x
 
     def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
@@ -732,7 +750,7 @@ class Model(nn.Module):
     def info(self, verbose=False, img_size=640):  # print model information
         model_info(self, verbose, img_size)
 
-
+#根据yaml文件构建模型
 def parse_model(d, ch):  # model_dict, input_channels(3)
     logger.info('\n%3s%18s%3s%10s  %-40s%-30s' % ('', 'from', 'n', 'params', 'module', 'arguments'))
     anchors, nc, gd, gw = d['anchors'], d['nc'], d['depth_multiple'], d['width_multiple']
@@ -825,7 +843,7 @@ if __name__ == '__main__':
 
     # Create model
     model = Model(opt.cfg).to(device)
-    model.train()
+    # model.train()
     
     if opt.profile:
         img = torch.rand(1, 3, 640, 640).to(device)

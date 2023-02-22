@@ -240,20 +240,20 @@ class End2End(nn.Module):
         x = self.end2end(x)
         return x
 
-
-
-
-
 def attempt_load(weights, map_location=None):
     # Loads an ensemble of models weights=[a,b,c] or a single model weights=[a] or weights=a
     model = Ensemble()
     for w in weights if isinstance(weights, list) else [weights]:
+        print('w:{}'.format(w))
         attempt_download(w)
-        ckpt = torch.load(w, map_location=map_location)  # load
+        ckpt = torch.load(w, map_location=map_location)  # load 返回一个dict “model”:nn.ModuleList
+        print('type(ckpt) :{}'.format(type(ckpt)))
+        # print('ckpt:{}'.format(ckpt))
         model.append(ckpt['ema' if ckpt.get('ema') else 'model'].float().fuse().eval())  # FP32 model
     
     # Compatibility updates
     for m in model.modules():
+        # print('m:{}'.format(m))
         if type(m) in [nn.Hardswish, nn.LeakyReLU, nn.ReLU, nn.ReLU6, nn.SiLU]:
             m.inplace = True  # pytorch 1.7.0 compatibility
         elif type(m) is nn.Upsample:

@@ -63,7 +63,7 @@ def exif_size(img):
 
 
 def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=False, cache=False, pad=0.0, rect=False,
-                      rank=-1, world_size=1, workers=8, image_weights=False, quad=False, prefix='',withLane=False):
+                      rank=-1, world_size=1, workers=8, image_weights=False, quad=False, prefix='',isLane=True):
     # Make sure only the first process in DDP process the dataset first, and the following others can use the cache
     with torch_distributed_zero_first(rank):
         dataset = LoadImagesAndLabels(path, imgsz, batch_size,
@@ -76,8 +76,7 @@ def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=Fa
                                       pad=pad,
                                       image_weights=image_weights,
                                       prefix=prefix,
-                                      withLane=withLane
-                                      )
+                                      isLane=True)
 
     batch_size = min(batch_size, len(dataset))
     nw = min([os.cpu_count() // world_size, batch_size if batch_size > 1 else 0, workers])  # number of workers
@@ -354,8 +353,8 @@ def img2label_paths(img_paths):
 
 class LoadImagesAndLabels(Dataset):  # for training/testing
     def __init__(self, path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
-                 cache_images=False, single_cls=False, stride=32, pad=0.0, prefix='',withLane=False):
-        self.withLane=withLane
+                 cache_images=False, single_cls=False, stride=32, pad=0.0, prefix='',isLane=False):
+        self.isLane=isLane
         self.img_size = img_size
         self.augment = augment
         self.hyp = hyp
@@ -366,6 +365,9 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.stride = stride
         self.path = path        
         #self.albumentations = Albumentations() if augment else None
+
+        print('augment:{},rect:{}'.format(self.augment,self.rect))
+
 
         try:
             f = []  # image files
@@ -385,7 +387,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             self.img_files = sorted([x.replace('/', os.sep) for x in f if x.split('.')[-1].lower() in img_formats])
             # self.img_files = sorted([x for x in f if x.suffix[1:].lower() in img_formats])  # pathlib
             assert self.img_files, f'{prefix}No images found'
-        except Exception as e:  
+        except Exception as e:
             raise Exception(f'{prefix}Error loading data from {path}: {e}\nSee {help_url}')
 
         # Check cache
@@ -403,7 +405,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         if exists:
             d = f"Scanning '{cache_path}' images and labels... {nf} found, {nm} missing, {ne} empty, {nc} corrupted"
             tqdm(None, desc=prefix + d, total=n, initial=n)  # display cache results
-        assert nf > 0 or not augment, f'{prefix}No labels in {cache_path}. Can not train without labels. See {help_url}'
+        # assert nf > 0 or not augment, f'{prefix}No labels in {cache_path}. Can not train without labels. See {help_url}'
 
         # Read cache
         cache.pop('hash')  # remove hash
@@ -418,7 +420,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 x[:, 0] = 0
 
         n = len(shapes)  # number of images
-        bi = np.floor(np.arange(n) / batch_size).astype(np.int)  # batch index
+        bi = np.floor(np.arange(n) / batch_size).astype(int)  # batch index
         nb = bi[-1] + 1  # number of batches
         self.batch = bi  # batch index of image
         self.n = n
@@ -446,7 +448,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 elif mini > 1:
                     shapes[i] = [1, 1 / mini]
 
-            self.batch_shapes = np.ceil(np.array(shapes) * img_size / stride + pad).astype(np.int) * stride
+            self.batch_shapes = np.ceil(np.array(shapes) * img_size / stride + pad).astype(int) * stride
 
         # Cache images into memory for faster training (WARNING: large datasets may exceed system RAM)
         self.imgs = [None] * n
@@ -621,7 +623,6 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 if nL:
                     labels[:, 1] = 1 - labels[:, 1]
 
-        #这里需要添加车道线有关的gt
         labels_out = torch.zeros((nL, 6))
         if nL:
             labels_out[:, 1:] = torch.from_numpy(labels)
@@ -630,20 +631,62 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
         img = np.ascontiguousarray(img)
 
-        if self.withLane:
-            #加载出车道线数据
-            # lane_labels_out = torch.zeros((1, img.shape[1],img.shape(2)))
-            # return torch.from_numpy(img), [labels_out,labels_out], self.img_files[index], shapes
-            return torch.from_numpy(img), [labels_out,labels_out], self.img_files[index], shapes
-        else:    
+        if self.isLane:
+            lane_labels_out = torch.zeros((1, 640,640)) #构建一个二分类 chw
+            # lane_labels_out[1,...] = 1.
+
+            label_path = self.img_files[index].replace('ColorImage','Label').replace('.jpg','_bin.png')
+            label_img = cv2.imread(label_path)
+            # print('img_files:{},index:{}'.format(self.img_files,index))
+            # print('read {}'.format(label_path))
+            shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
+            #做完letterbox后,由于做了resize,插值会导致像素亮度值的改变.
+            letter_label_img, _, _ = letterbox(label_img, shape,auto=False, scaleup=self.augment)
+            # cv2.imwrite('./label_img.png',letter_label_img)
+            LANE_COLOR = [((8,35,142)),(43,173,180)] #bgr order
+            for color in LANE_COLOR:
+                h_idx,w_idx = np.where((letter_label_img == color).all(axis=2)) 
+                # print('h_idx:{},w_idx:{}'.format(h_idx,w_idx))
+                lane_labels_out[0,h_idx,w_idx] = 1 
+                # lane_labels_out[1,h_idx,w_idx] = 0 
+
+            gray_label_img = lane_labels_out.permute(1, 2, 0).numpy()
+            # print('gray_label_img:{}'.format(gray_label_img))
+            gray_label_img = 255 * gray_label_img
+            # cv2.imwrite('./gray_label_img.png',gray_label_img)
+
+            #校验数据增强后的输入图片     
+            
+            #校验lane_targets是否正确
+            gray_label_img = np.zeros_like(lane_labels_out)
+            lane_mask = np.where(lane_labels_out==1) 
+            gray_label_img[lane_mask] = 255
+            gray_label_img = gray_label_img.transpose(1,2,0)
+            # cv2.imwrite('./lane_labels_out.png',gray_label_img)
+
+            input_img = img.copy() #chw rgb
+            # input_img = np.zeros((3,640,640))
+            # print('lane_mask:{}'.format(lane_mask))
+            input_img[0,lane_mask[1],lane_mask[2]] = 255
+            input_img[1,lane_mask[1],lane_mask[2]] = 0 
+            input_img[2,lane_mask[1],lane_mask[2]] = 0  
+            input_img = input_img.transpose(1,2,0)[...,::-1] #hwc bgr
+            # cv2.imwrite('./lane_input_img.png',input_img)
+
+            return torch.from_numpy(img), [labels_out,lane_labels_out], self.img_files[index], shapes
+        else:
             return torch.from_numpy(img), labels_out, self.img_files[index], shapes
 
     @staticmethod
     def collate_fn(batch):
         img, label, path, shapes = zip(*batch)  # transposed
+        label_det, label_lane = [], []
         for i, l in enumerate(label):
-            l[:, 0] = i  # add target image index for build_targets()
-        return torch.stack(img, 0), torch.cat(label, 0), path, shapes
+            l_det, l_lane = l
+            l_det[:, 0] = i  # add target image index for build_targets()
+            label_det.append(l_det)
+            label_lane.append(l_lane)
+        return torch.stack(img, 0), [torch.cat(label_det, 0),torch.stack(label_lane,0)], path, shapes
 
     @staticmethod
     def collate_fn4(batch):
@@ -1210,7 +1253,7 @@ def pastein(image, labels, sample_labels, sample_images, sample_masks):
                 r_image = cv2.resize(sample_images[sel_ind], (r_w, r_h))
                 temp_crop = image[ymin:ymin+r_h, xmin:xmin+r_w]
                 m_ind = r_mask > 0
-                if m_ind.astype(np.int).sum() > 60:
+                if m_ind.astype(np.int32).sum() > 60:
                     temp_crop[m_ind] = r_image[m_ind]
                     #print(sample_labels[sel_ind])
                     #print(sample_images[sel_ind].shape)
@@ -1328,3 +1371,255 @@ def load_segmentations(self, index):
     #print(key)
     # /work/handsomejw66/coco17/
     return self.segs[key]
+
+import torchvision.transforms as transforms
+class AutoDriveDataset(Dataset):
+    """
+    A general Dataset for some common function
+    """
+    def __init__(self, cfg, is_train, inputsize=640, transform=None):
+        """
+        initial all the characteristic
+
+        Inputs:
+        -cfg: configurations
+        -is_train(bool): whether train set or not
+        -transform: ToTensor and Normalize
+        
+        Returns:
+        None
+        """
+        self.is_train = is_train
+        self.cfg = cfg
+        self.transform = transform
+        self.inputsize = inputsize
+        self.Tensor = transforms.ToTensor()
+        img_root = Path(cfg.DATASET.DATAROOT)
+        label_root = Path(cfg.DATASET.LABELROOT)
+        mask_root = Path(cfg.DATASET.MASKROOT)
+        lane_root = Path(cfg.DATASET.LANEROOT)
+        if is_train:
+            indicator = cfg.DATASET.TRAIN_SET
+        else:
+            indicator = cfg.DATASET.TEST_SET
+        self.img_root = img_root / indicator
+        self.label_root = label_root / indicator
+        self.mask_root = mask_root / indicator
+        self.lane_root = lane_root / indicator
+        # self.label_list = self.label_root.iterdir()
+        self.mask_list = self.mask_root.iterdir()
+
+        self.db = []
+
+        self.data_format = cfg.DATASET.DATA_FORMAT
+
+        self.scale_factor = cfg.DATASET.SCALE_FACTOR
+        self.rotation_factor = cfg.DATASET.ROT_FACTOR
+        self.flip = cfg.DATASET.FLIP
+        self.color_rgb = cfg.DATASET.COLOR_RGB
+
+        # self.target_type = cfg.MODEL.TARGET_TYPE
+        self.shapes = np.array(cfg.DATASET.ORG_IMG_SIZE)
+    
+    def _get_db(self):
+        """
+        finished on children Dataset(for dataset which is not in Bdd100k format, rewrite children Dataset)
+        """
+        raise NotImplementedError
+
+    def evaluate(self, cfg, preds, output_dir):
+        """
+        finished on children dataset
+        """
+        raise NotImplementedError
+    
+    def __len__(self,):
+        """
+        number of objects in the dataset
+        """
+        return len(self.db)
+
+    def __getitem__(self, idx):
+        """
+        Get input and groud-truth from database & add data augmentation on input
+
+        Inputs:
+        -idx: the index of image in self.db(database)(list)
+        self.db(list) [a,b,c,...]
+        a: (dictionary){'image':, 'information':}
+
+        Returns:
+        -image: transformed image, first passed the data augmentation in __getitem__ function(type:numpy), then apply self.transform
+        -target: ground truth(det_gt,seg_gt)
+
+        function maybe useful
+        cv2.imread
+        cv2.cvtColor(data, cv2.COLOR_BGR2RGB)
+        cv2.warpAffine
+        """
+        data = self.db[idx]
+        img = cv2.imread(data["image"], cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        # seg_label = cv2.imread(data["mask"], 0)
+        if self.cfg.num_seg_class == 3:
+            seg_label = cv2.imread(data["mask"])
+        else:
+            seg_label = cv2.imread(data["mask"], 0)
+        lane_label = cv2.imread(data["lane"], 0)
+        #print(lane_label.shape)
+        # print(seg_label.shape)
+        # print(lane_label.shape)
+        # print(seg_label.shape)
+        resized_shape = self.inputsize
+        if isinstance(resized_shape, list):
+            resized_shape = max(resized_shape)
+        h0, w0 = img.shape[:2]  # orig hw
+        r = resized_shape / max(h0, w0)  # resize image to img_size
+        if r != 1:  # always resize down, only resize up if training with augmentation
+            interp = cv2.INTER_AREA if r < 1 else cv2.INTER_LINEAR
+            img = cv2.resize(img, (int(w0 * r), int(h0 * r)), interpolation=interp)
+            seg_label = cv2.resize(seg_label, (int(w0 * r), int(h0 * r)), interpolation=interp)
+            lane_label = cv2.resize(lane_label, (int(w0 * r), int(h0 * r)), interpolation=interp)
+        h, w = img.shape[:2]
+        
+        (img, seg_label, lane_label), ratio, pad = letterbox((img, seg_label, lane_label), resized_shape, auto=True, scaleup=self.is_train)
+        shapes = (h0, w0), ((h / h0, w / w0), pad)  # for COCO mAP rescaling
+        # ratio = (w / w0, h / h0)
+        # print(resized_shape)
+        
+        det_label = data["label"]
+        labels=[]
+        
+        if det_label.size > 0:
+            # Normalized xywh to pixel xyxy format
+            labels = det_label.copy()
+            labels[:, 1] = ratio[0] * w * (det_label[:, 1] - det_label[:, 3] / 2) + pad[0]  # pad width
+            labels[:, 2] = ratio[1] * h * (det_label[:, 2] - det_label[:, 4] / 2) + pad[1]  # pad height
+            labels[:, 3] = ratio[0] * w * (det_label[:, 1] + det_label[:, 3] / 2) + pad[0]
+            labels[:, 4] = ratio[1] * h * (det_label[:, 2] + det_label[:, 4] / 2) + pad[1]
+            
+        if self.is_train:
+            combination = (img, seg_label, lane_label)
+            (img, seg_label, lane_label), labels = random_perspective(
+                combination=combination,
+                targets=labels,
+                degrees=self.cfg.DATASET.ROT_FACTOR,
+                translate=self.cfg.DATASET.TRANSLATE,
+                scale=self.cfg.DATASET.SCALE_FACTOR,
+                shear=self.cfg.DATASET.SHEAR
+            )
+            #print(labels.shape)
+            augment_hsv(img, hgain=self.cfg.DATASET.HSV_H, sgain=self.cfg.DATASET.HSV_S, vgain=self.cfg.DATASET.HSV_V)
+            # img, seg_label, labels = cutout(combination=combination, labels=labels)
+
+            if len(labels):
+                # convert xyxy to xywh
+                labels[:, 1:5] = xyxy2xywh(labels[:, 1:5])
+
+                # Normalize coordinates 0 - 1
+                labels[:, [2, 4]] /= img.shape[0]  # height
+                labels[:, [1, 3]] /= img.shape[1]  # width
+
+            # if self.is_train:
+            # random left-right flip
+            lr_flip = True
+            if lr_flip and random.random() < 0.5:
+                img = np.fliplr(img)
+                seg_label = np.fliplr(seg_label)
+                lane_label = np.fliplr(lane_label)
+                if len(labels):
+                    labels[:, 1] = 1 - labels[:, 1]
+
+            # random up-down flip
+            ud_flip = False
+            if ud_flip and random.random() < 0.5:
+                img = np.flipud(img)
+                seg_label = np.filpud(seg_label)
+                lane_label = np.filpud(lane_label)
+                if len(labels):
+                    labels[:, 2] = 1 - labels[:, 2]
+        
+        else:
+            if len(labels):
+                # convert xyxy to xywh
+                labels[:, 1:5] = xyxy2xywh(labels[:, 1:5])
+
+                # Normalize coordinates 0 - 1
+                labels[:, [2, 4]] /= img.shape[0]  # height
+                labels[:, [1, 3]] /= img.shape[1]  # width
+
+        labels_out = torch.zeros((len(labels), 6))
+        if len(labels):
+            labels_out[:, 1:] = torch.from_numpy(labels)
+        # Convert
+        # img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
+        # img = img.transpose(2, 0, 1)
+        img = np.ascontiguousarray(img)
+        # seg_label = np.ascontiguousarray(seg_label)
+        # if idx == 0:
+        #     print(seg_label[:,:,0])
+
+        if self.cfg.num_seg_class == 3:
+            _,seg0 = cv2.threshold(seg_label[:,:,0],128,255,cv2.THRESH_BINARY)
+            _,seg1 = cv2.threshold(seg_label[:,:,1],1,255,cv2.THRESH_BINARY)
+            _,seg2 = cv2.threshold(seg_label[:,:,2],1,255,cv2.THRESH_BINARY)
+        else:
+            _,seg1 = cv2.threshold(seg_label,1,255,cv2.THRESH_BINARY)
+            _,seg2 = cv2.threshold(seg_label,1,255,cv2.THRESH_BINARY_INV)
+        _,lane1 = cv2.threshold(lane_label,1,255,cv2.THRESH_BINARY)
+        _,lane2 = cv2.threshold(lane_label,1,255,cv2.THRESH_BINARY_INV)
+#        _,seg2 = cv2.threshold(seg_label[:,:,2],1,255,cv2.THRESH_BINARY)
+        # # seg1[cutout_mask] = 0
+        # # seg2[cutout_mask] = 0
+        
+        # seg_label /= 255
+        # seg0 = self.Tensor(seg0)
+        if self.cfg.num_seg_class == 3:
+            seg0 = self.Tensor(seg0)
+        seg1 = self.Tensor(seg1)
+        seg2 = self.Tensor(seg2)
+        # seg1 = self.Tensor(seg1)
+        # seg2 = self.Tensor(seg2)
+        lane1 = self.Tensor(lane1)
+        lane2 = self.Tensor(lane2)
+
+        # seg_label = torch.stack((seg2[0], seg1[0]),0)
+        if self.cfg.num_seg_class == 3:
+            seg_label = torch.stack((seg0[0],seg1[0],seg2[0]),0)
+        else:
+            seg_label = torch.stack((seg2[0], seg1[0]),0)
+            
+        lane_label = torch.stack((lane2[0], lane1[0]),0)
+        # _, gt_mask = torch.max(seg_label, 0)
+        # _ = show_seg_result(img, gt_mask, idx, 0, save_dir='debug', is_gt=True)
+        
+
+        target = [labels_out, seg_label, lane_label]
+        img = self.transform(img)
+
+        return img, target, data["image"], shapes
+
+    def select_data(self, db):
+        """
+        You can use this function to filter useless images in the dataset
+
+        Inputs:
+        -db: (list)database
+
+        Returns:
+        -db_selected: (list)filtered dataset
+        """
+        db_selected = ...
+        return db_selected
+
+    @staticmethod
+    def collate_fn(batch):
+        img, label, paths, shapes= zip(*batch)
+        label_det, label_seg, label_lane = [], [], []
+        for i, l in enumerate(label):
+            l_det, l_seg, l_lane = l
+            l_det[:, 0] = i  # add target image index for build_targets()
+            label_det.append(l_det)
+            label_seg.append(l_seg)
+            label_lane.append(l_lane)
+        return torch.stack(img, 0), [torch.cat(label_det, 0), torch.stack(label_seg, 0), torch.stack(label_lane, 0)], paths, shapes

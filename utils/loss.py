@@ -1,5 +1,6 @@
 # Loss functions
-
+import cv2
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -429,7 +430,7 @@ class ComputeLoss:
         # Define criteria
         BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['cls_pw']], device=device))
         BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['obj_pw']], device=device))
-        self.BCEseg = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['obj_pw']],device=device))
+        self.BCEseg = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['seg_pw']],device=device))
 
         # Class label smoothing https://arxiv.org/pdf/1902.04103.pdf eqn 3
         self.cp, self.cn = smooth_BCE(eps=h.get('label_smoothing', 0.0))  # positive, negative BCE targets
@@ -448,9 +449,10 @@ class ComputeLoss:
         for k in 'na', 'nc', 'nl', 'anchors':
             setattr(self, k, getattr(det, k))
 
-    def __call__(self, predictions, targets,withLaneLoss=False):  # predictions, targets, model
-        p,lane = predictions[0],predictions[1]
-        print('obj head:{},lane head:{}'.format(len(p),lane.shape))
+    def __call__(self, predictions, multi_targets,withLaneLoss=False):  # predictions, targets, model
+        p,lane_pre = predictions[0],predictions[1]
+        # print('obj head:{},lane head:{}'.format(len(p),lane.shape))
+        targets,lane_targets = multi_targets[0],multi_targets[1]
 
         device = targets.device
         lcls, lbox, lobj = torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device)
@@ -503,9 +505,44 @@ class ComputeLoss:
         #lane seg loss
         llane = torch.zeros(1, device=device)
         if withLaneLoss:
-            llane = self.BCEseg(lane,targets)
+            llane += self.BCEseg(lane_pre,lane_targets)
+            
             print('llane:{}'.format(llane))
 
+            loss = llane
+            # print('loss:{},lbox:{},llane:{}'.format(loss.shape,lbox.shape,llane.shape))
+
+            #校验各个部分的准确率
+            lane_mask=(lane_targets==1)
+            # print('lane pixel:{}'.format(torch.where(lane_mask==True)))
+            correct_pre = (torch.sigmoid(lane_pre[lane_mask]) > 0.7)
+            correct_pre_num = correct_pre.sum()
+            lane_num = lane_mask.sum()
+            print('lane_num:{},correct_pre_num:{},percentage:{}'.format(lane_num,correct_pre_num,correct_pre_num/lane_num))
+            
+            correct_unlane_pre = (torch.sigmoid(lane_pre[~lane_mask]) < 0.5)
+            correct_unlane_pre_num = correct_unlane_pre.sum()
+            unlane_num = (~lane_mask).sum()
+            print('unlane_num:{},correct_unlane_pre_num:{},percentage:{}'.format(unlane_num,correct_unlane_pre_num,correct_unlane_pre_num/unlane_num))
+
+            lane_pre = torch.sigmoid(lane_pre)
+            print(lane_pre.shape)
+            lane_pre = lane_pre.float().cpu() #bchw
+            pre_mask=np.where(lane_pre > 0.7)
+            gray_label_img = np.zeros_like(lane_pre.detach().numpy())
+            gray_label_img[pre_mask] = 255
+            gray_label_img = gray_label_img.transpose(0,2,3,1)
+            cv2.imwrite('./pre_gray_label_img.png',gray_label_img[0,...])
+
+            #校验lane_targets是否正确
+            lane_targets = lane_targets.float().cpu() #bchw
+            pre_mask=np.where(lane_targets > 0.7)
+            gray_label_img = np.zeros_like(lane_targets.detach().numpy())
+            gray_label_img[pre_mask] = 255
+            gray_label_img = gray_label_img.transpose(0,2,3,1)
+            # cv2.imwrite('./lane_targets_img.png',gray_label_img[0,...])
+
+        # print('loss:{},lbox:{}'.format(loss.shape,lbox.shape))
         return loss * bs, torch.cat((lbox, lobj, lcls, loss)).detach()
 
     def build_targets(self, p, targets):

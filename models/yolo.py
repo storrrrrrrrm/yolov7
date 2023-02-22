@@ -527,11 +527,13 @@ class Model(nn.Module):
             logger.info(f'Overriding model.yaml anchors with anchors={anchors}')
             self.yaml['anchors'] = round(anchors)  # override yaml value
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist
+        print('self.save:{}'.format(self.save))
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         # print([x.shape for x in self.forward(torch.zeros(1, ch, 64, 64))])
 
         # Build strides, anchors
         m = self.model[-1]  # Detect()
+        # print('m is {}'.format(m))
         if isinstance(m, Detect):
             s = 256  # 2x min stride
             m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
@@ -542,7 +544,7 @@ class Model(nn.Module):
             # print('Strides: %s' % m.stride.tolist())
         if isinstance(m, IDetect):
             s = 256  # 2x min stride
-            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
+            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))[0]])  # forward
             check_anchor_order(m)
             m.anchors /= m.stride.view(-1, 1, 1)
             self.stride = m.stride
@@ -580,7 +582,7 @@ class Model(nn.Module):
         logger.info('')
 
     def forward(self, x, augment=False, profile=False):
-        print('x shape:{}'.format(x.shape))
+        # print('x shape:{}'.format(x.shape))
         if augment:
             img_size = x.shape[-2:]  # height, width
             s = [1, 0.83, 0.67]  # scales
@@ -601,7 +603,10 @@ class Model(nn.Module):
             return self.forward_once(x, profile)  # single-scale inference, train
 
     def forward_once(self, x, profile=False):
-        print('forward_once x shape:{}'.format(x.shape))
+        # print('forward_once x shape:{}'.format(x.shape))
+        lane_seg_layer_idx=109
+        lane_seg_head_out = None
+        
         y, dt = [], []  # outputs
         backbone_layer_idx=[i for i in range(51)]
         backbone_layer_compute_time=0
@@ -632,21 +637,30 @@ class Model(nn.Module):
 
             t0=time.time()
             x = m(x)  # run
+
             t1=time.time()
             if i in backbone_layer_idx:
                 backbone_layer_compute_time +=(t1-t0)
             else:
                 head_compute_time +=(t1-t0)
+
             y.append(x if m.i in self.save else None)  # save output
 
+            if i == lane_seg_layer_idx:
+                # m=nn.Sigmoid()
+                lane_seg_head_out=x
+                # print('layer {} out shape {}'.format(i,lane_seg_head_out.shape))
+                
         if profile:
             print('%.1fms total' % sum(dt))
         
+        # print('backbone_layer_compute_time:{}'.format(backbone_layer_compute_time))
+        # print('head_compute_time:{}'.format(head_compute_time))
+        # print('total ops:{}GFLOPS'.format(total_ops))
 
-        print('backbone_layer_compute_time:{}'.format(backbone_layer_compute_time))
-        print('head_compute_time:{}'.format(head_compute_time))
-        print('total ops:{}GFLOPS'.format(total_ops))
-        return x
+        # print('type(x):{},type(lane_seg_head_out):{}'.format(type(x),type(lane_seg_head_out)))
+
+        return x,lane_seg_head_out
 
     def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
         # https://arxiv.org/abs/1708.02002 section 3.3
@@ -752,6 +766,8 @@ class Model(nn.Module):
 
 #根据yaml文件构建模型
 def parse_model(d, ch):  # model_dict, input_channels(3)
+    do_not_change_out_channel_layer_idx=109
+    
     logger.info('\n%3s%18s%3s%10s  %-40s%-30s' % ('', 'from', 'n', 'params', 'module', 'arguments'))
     anchors, nc, gd, gw = d['anchors'], d['nc'], d['depth_multiple'], d['width_multiple']
     na = (len(anchors[0]) // 2) if isinstance(anchors, list) else anchors  # number of anchors
@@ -779,8 +795,10 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
                  SwinTransformerBlock, STCSPA, STCSPB, STCSPC,
                  SwinTransformer2Block, ST2CSPA, ST2CSPB, ST2CSPC]:
             c1, c2 = ch[f], args[0]
-            if c2 != no:  # if not output
+            # print('c1:{},c2:{}'.format(ch[f],args[0]))
+            if c2 != no and i != do_not_change_out_channel_layer_idx:  # if not output
                 c2 = make_divisible(c2 * gw, 8)
+                # print('layer {},change c2 from {} to {}'.format(i,args[0],c2))
 
             args = [c1, c2, *args[1:]]
             if m in [DownC, SPPCSPC, GhostSPPCSPC, 

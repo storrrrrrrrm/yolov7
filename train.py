@@ -1,3 +1,5 @@
+import cv2
+
 import argparse
 import logging
 import math
@@ -25,7 +27,8 @@ import test  # import test.py to get mAP after each epoch
 from models.experimental import attempt_load
 from models.yolo import Model
 from utils.autoanchor import check_anchors
-from utils.datasets import create_dataloader
+# from utils.datasets import create_dataloader
+from utils.multitask_dataset import create_dataloader
 from utils.general import labels_to_class_weights, increment_path, labels_to_image_weights, init_seeds, \
     fitness, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
     check_requirements, print_mutation, set_logging, one_cycle, colorstr
@@ -37,6 +40,11 @@ from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
 
 logger = logging.getLogger(__name__)
 
+
+Encoder_para_idx = [str(i) for i in range(0, 75)]
+Ll_Seg_Head_para_idx = [str(i) for i in range(102,110)]
+
+train_lane_seg_only=True
 
 def train(hyp, opt, device, tb_writer=None):
     logger.info(colorstr('hyperparameters: ') + ', '.join(f'{k}={v}' for k, v in hyp.items()))
@@ -57,7 +65,8 @@ def train(hyp, opt, device, tb_writer=None):
         yaml.dump(vars(opt), f, sort_keys=False)
 
     # Configure
-    plots = not opt.evolve  # create plots
+    # plots = not opt.evolve  # create plots
+    plots = False
     cuda = device.type != 'cpu'
     init_seeds(2 + rank)
     with open(opt.data) as f:
@@ -86,7 +95,7 @@ def train(hyp, opt, device, tb_writer=None):
             attempt_download(weights)  # download if not found locally
         ckpt = torch.load(weights, map_location=device)  # load checkpoint
         model = Model(opt.cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
-        print('model is {}'.format(model))
+        # print('model is {}'.format(model))
         exclude = ['anchor'] if (opt.cfg or hyp.get('anchors')) and not opt.resume else []  # exclude keys
         state_dict = ckpt['model'].float().state_dict()  # to FP32
         state_dict = intersect_dicts(state_dict, model.state_dict(), exclude=exclude)  # intersect
@@ -94,7 +103,7 @@ def train(hyp, opt, device, tb_writer=None):
         logger.info('Transferred %g/%g items from %s' % (len(state_dict), len(model.state_dict()), weights))  # report
     else:
         model = Model(opt.cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
-        print('model is {}'.format(model))
+        # print('model is {}'.format(model))
 
     with torch_distributed_zero_first(rank):
         check_dataset(data_dict)  # check
@@ -108,6 +117,16 @@ def train(hyp, opt, device, tb_writer=None):
         if any(x in k for x in freeze):
             print('freezing %s' % k)
             v.requires_grad = False
+
+    # Train lane seg only
+    if train_lane_seg_only:
+        for k, v in model.named_parameters():
+            layer_idx = k.split('.')[1]
+            if layer_idx in (Encoder_para_idx + Ll_Seg_Head_para_idx):
+                # print('layer_idx:{},k:{}'.format(layer_idx,k))
+                v.requires_grad = True
+            else:
+                v.requires_grad = False
 
     # Optimizer
     nbs = 64  # nominal batch size
@@ -221,6 +240,7 @@ def train(hyp, opt, device, tb_writer=None):
 
         # Epochs
         start_epoch = ckpt['epoch'] + 1
+        print('start_epoch:{}'.format(start_epoch))
         if opt.resume:
             assert start_epoch > 0, '%s training to %g epochs is finished, nothing to resume.' % (weights, epochs)
         if epochs < start_epoch:
@@ -246,12 +266,12 @@ def train(hyp, opt, device, tb_writer=None):
 
     # Trainloader
     dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
-                                            hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
+                                            hyp=hyp, augment=False, cache=opt.cache_images, rect=opt.rect, rank=rank,
                                             world_size=opt.world_size, workers=opt.workers,
-                                            image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '))
-    mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
+                                            image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '),isLane=True)
+    # mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
     nb = len(dataloader)  # number of batches
-    assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (mlc, nc, opt.data, nc - 1)
+    # assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (mlc, nc, opt.data, nc - 1)
 
     # Process 0
     if rank in [-1, 0]:
@@ -336,7 +356,9 @@ def train(hyp, opt, device, tb_writer=None):
         if rank in [-1, 0]:
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
-        for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+        for i, (imgs, multi_targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+            # print('{}'.format(i))
+            targets,lane_targets = multi_targets
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
 
@@ -362,11 +384,31 @@ def train(hyp, opt, device, tb_writer=None):
             # Forward
             with amp.autocast(enabled=cuda):
                 pred = model(imgs)  # forward
-                print('type(pred[0]):{}'.format(type(pred[0])))
+                # print('type(pred[0]):{}'.format(type(pred[0])))
                 if 'loss_ota' not in hyp or hyp['loss_ota'] == 1:
                     loss, loss_items = compute_loss_ota(pred, targets.to(device), imgs)  # loss scaled by batch_size
                 else:
-                    loss, loss_items = compute_loss(pred, targets.to(device),withLaneLoss=True)  # loss scaled by batch_size
+                    multi_targets = [e.to(device) for e in multi_targets]
+                    loss, loss_items = compute_loss(pred, multi_targets,withLaneLoss=True)  # loss scaled by batch_size
+
+                    #隔一段时间绘制一次预测结果图
+                    if i%10 == 0:
+                        _,lane = pred[0],pred[1] #lane 2x640x640
+                        lane = lane.float().cpu() #bchw
+                        # print('lane:{}'.format(lane.shape))
+                        b,h,w=np.where((torch.sigmoid(lane[:,0,...]) > 0.7))
+                        gray_label_img = lane.permute(0,2,3,1).detach().numpy().astype(np.float32)
+                        gray_label_img = 255 * gray_label_img
+                        gray_label_img=gray_label_img[0,...]
+                        # print('len(h):{}'.format(len(h)))
+                        # print('gray_label_img:{},data type:{}'.format(gray_label_img.shape,gray_label_img.dtype))
+                        # cv2.imwrite('./pre_gray_label_img.png',gray_label_img)
+                        # h_idx,w_idx = np.where((lane[:,0,...] > 0.8))
+                        # print('h_idx:{},w_idx:{}'.format(len(h_idx),len(w_idx)))
+                        # print('h_idx:{},w_idx:{}'.format(h_idx,w_idx))
+
+                        pass
+
                 if rank != -1:
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
                 if opt.quad:
@@ -416,19 +458,19 @@ def train(hyp, opt, device, tb_writer=None):
             final_epoch = epoch + 1 == epochs
             if not opt.notest or final_epoch:  # Calculate mAP
                 wandb_logger.current_epoch = epoch + 1
-                results, maps, times = test.test(data_dict,
-                                                 batch_size=batch_size * 2,
-                                                 imgsz=imgsz_test,
-                                                 model=ema.ema,
-                                                 single_cls=opt.single_cls,
-                                                 dataloader=testloader,
-                                                 save_dir=save_dir,
-                                                 verbose=nc < 50 and final_epoch,
-                                                 plots=plots and final_epoch,
-                                                 wandb_logger=wandb_logger,
-                                                 compute_loss=compute_loss,
-                                                 is_coco=is_coco,
-                                                 v5_metric=opt.v5_metric)
+                # results, maps, times = test.test(data_dict,
+                #                                  batch_size=batch_size * 2,
+                #                                  imgsz=imgsz_test,
+                #                                  model=ema.ema,
+                #                                  single_cls=opt.single_cls,
+                #                                  dataloader=testloader,
+                #                                  save_dir=save_dir,
+                #                                  verbose=nc < 50 and final_epoch,
+                #                                  plots=plots and final_epoch,
+                #                                  wandb_logger=wandb_logger,
+                #                                  compute_loss=compute_loss,
+                #                                  is_coco=is_coco,
+                #                                  v5_metric=opt.v5_metric)
 
             # Write
             with open(results_file, 'a') as f:
@@ -466,6 +508,7 @@ def train(hyp, opt, device, tb_writer=None):
 
                 # Save last, best and delete
                 torch.save(ckpt, last)
+                print('save {}'.format(last))
                 if best_fitness == fi:
                     torch.save(ckpt, best)
                 if (best_fitness == fi) and (epoch >= 200):
@@ -484,6 +527,9 @@ def train(hyp, opt, device, tb_writer=None):
 
         # end epoch ----------------------------------------------------------------------------------------------------
     # end training
+    
+    print('training end***************')
+
     if rank in [-1, 0]:
         # Plots
         if plots:
@@ -531,7 +577,8 @@ def train(hyp, opt, device, tb_writer=None):
 if __name__ == '__main__':
     """
     本机conda环境:SMOKE
-    python train.py --workers 8 --device 0 --batch-size 1 --data data/coco.yaml --img 640 640 --cfg cfg/training/yolov7.yaml --weights '' --name yolov7 --hyp data/hyp.scratch.p5.yaml
+    训练机环境:base
+    python train.py --workers 8 --device 0 --batch-size 1 --data data/coco.yaml --img 640 640 --cfg cfg/training/yolov7.yaml --weights '' --name yolov7 --hyp data/hyp.scratch.p5.yaml --notest --evolve
     """
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', type=str, default='yolov7.pt', help='initial weights path')

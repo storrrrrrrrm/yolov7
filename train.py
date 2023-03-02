@@ -327,6 +327,7 @@ def train(hyp, opt, device, tb_writer=None):
                 f'Logging results to {save_dir}\n'
                 f'Starting training for {epochs} epochs...')
     torch.save(model, wdir / 'init.pt')
+    
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         model.train()
 
@@ -389,25 +390,16 @@ def train(hyp, opt, device, tb_writer=None):
                     loss, loss_items = compute_loss_ota(pred, targets.to(device), imgs)  # loss scaled by batch_size
                 else:
                     multi_targets = [e.to(device) for e in multi_targets]
+                    pos_weight = exponential_decay(epoch,200,100,1) #从200衰减到1,共计100epoch
+                    if pos_weight > 1:
+                        compute_loss.update_pos_weight(pos_weight)
                     loss, loss_items = compute_loss(pred, multi_targets,withLaneLoss=True)  # loss scaled by batch_size
 
                     #隔一段时间绘制一次预测结果图
-                    if i%10 == 0:
-                        _,lane = pred[0],pred[1] #lane 2x640x640
-                        lane = lane.float().cpu() #bchw
-                        # print('lane:{}'.format(lane.shape))
-                        b,h,w=np.where((torch.sigmoid(lane[:,0,...]) > 0.7))
-                        gray_label_img = lane.permute(0,2,3,1).detach().numpy().astype(np.float32)
-                        gray_label_img = 255 * gray_label_img
-                        gray_label_img=gray_label_img[0,...]
-                        # print('len(h):{}'.format(len(h)))
-                        # print('gray_label_img:{},data type:{}'.format(gray_label_img.shape,gray_label_img.dtype))
-                        # cv2.imwrite('./pre_gray_label_img.png',gray_label_img)
-                        # h_idx,w_idx = np.where((lane[:,0,...] > 0.8))
-                        # print('h_idx:{},w_idx:{}'.format(len(h_idx),len(w_idx)))
-                        # print('h_idx:{},w_idx:{}'.format(h_idx,w_idx))
-
-                        pass
+                    if i%1 == 0:
+                        _,lane_pre = pred[0],pred[1] #lane 2x640x640
+                        _,lane_gt = multi_targets[0],multi_targets[1]
+                        save_prediction_img(imgs,lane_pre,lane_gt,epoch,i)
 
                 if rank != -1:
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
@@ -515,7 +507,7 @@ def train(hyp, opt, device, tb_writer=None):
                     torch.save(ckpt, wdir / 'best_{:03d}.pt'.format(epoch))
                 if epoch == 0:
                     torch.save(ckpt, wdir / 'epoch_{:03d}.pt'.format(epoch))
-                elif ((epoch+1) % 25) == 0:
+                elif ((epoch+1) % 10) == 0:
                     torch.save(ckpt, wdir / 'epoch_{:03d}.pt'.format(epoch))
                 elif epoch >= (epochs-5):
                     torch.save(ckpt, wdir / 'epoch_{:03d}.pt'.format(epoch))
@@ -572,6 +564,59 @@ def train(hyp, opt, device, tb_writer=None):
         dist.destroy_process_group()
     torch.cuda.empty_cache()
     return results
+
+
+def save_prediction_img(imgs,lane_pre,lane_gt,epoch,batch):
+    save_dir='train_results/{}/{}'.format(epoch,batch)
+    isExist = os.path.exists(save_dir)
+    if not isExist:
+        # Create a new directory because it does not exist
+        os.makedirs(save_dir)
+        # print("The new directory is created!")
+
+    imgs = imgs.float().cpu() #bchw
+    lane_pre = lane_pre.float().cpu()
+    lane_gt = lane_gt.float().cpu()
+    result_images = imgs.permute(0,2,3,1).detach().numpy().astype(np.float32) #bhwc rgb
+    gt_images = result_images.copy()
+    # lane = lane.float().cpu() #bchw
+
+    b,_,_,_ = lane_gt.shape
+    for i in range(b):  
+        current_gt_lane = lane_gt[i]
+        gt_lane_mask = np.where(current_gt_lane==1)
+
+        current_lane_pre = torch.sigmoid(lane_pre[i,...])
+        current_lane_pre_mask = np.where(current_lane_pre>0.7)
+        pre_lane_num = len(current_lane_pre_mask[1])
+        # print('当前检测出车道点个数:{}'.format(pre_lane_num))
+        
+        result_image = result_images[i] * 255 #float32 to uint8
+        result_image = result_image[...,::-1] # rgb to bgr      
+        result_image[current_lane_pre_mask[1],current_lane_pre_mask[2],0] = 0
+        result_image[current_lane_pre_mask[1],current_lane_pre_mask[2],1] = 0
+        result_image[current_lane_pre_mask[1],current_lane_pre_mask[2],2] = 255 
+
+        save_img_name=None
+        save_img_name = '{}/{}_pre.jpg'.format(save_dir,i)
+        # print('save_img_name:{}'.format(save_img_name))
+        cv2.imwrite(save_img_name,result_image)
+
+        gt_image = gt_images[i] * 255
+        gt_image = gt_image[...,::-1] # rgb to bgr      
+        gt_image[gt_lane_mask[1],gt_lane_mask[2],0] = 0
+        gt_image[gt_lane_mask[1],gt_lane_mask[2],1] = 0
+        gt_image[gt_lane_mask[1],gt_lane_mask[2],2] = 255 
+        save_img_name = '{}/{}_gt.jpg'.format(save_dir,i)
+        # print('save_img_name:{}'.format(save_img_name))
+        cv2.imwrite(save_img_name,gt_image)
+
+import numpy as np
+def exponential_decay(t, init=0.8, m=30, finish=0.2):
+    alpha = np.log(init / finish) / m
+    l = - np.log(init) / alpha
+    decay = np.exp(-alpha * (t + l))
+    return decay
 
 
 if __name__ == '__main__':

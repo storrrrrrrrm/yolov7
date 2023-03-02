@@ -4,6 +4,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.cuda.amp import autocast
+import os
 
 from utils.general import bbox_iou, bbox_alpha_iou, box_iou, box_giou, box_diou, box_ciou, xywh2xyxy, xyxy2xywh
 from utils.torch_utils import is_parallel
@@ -427,6 +429,8 @@ class ComputeLoss:
         device = next(model.parameters()).device  # get model device
         h = model.hyp  # hyperparameters
 
+        self.seg_pw = h['seg_pw']
+
         # Define criteria
         BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['cls_pw']], device=device))
         BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['obj_pw']], device=device))
@@ -505,6 +509,7 @@ class ComputeLoss:
         #lane seg loss
         llane = torch.zeros(1, device=device)
         if withLaneLoss:
+            self.BCEseg = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([self.seg_pw],device=device))
             llane += self.BCEseg(lane_pre,lane_targets)
             
             print('llane:{}'.format(llane))
@@ -512,35 +517,50 @@ class ComputeLoss:
             loss = llane
             # print('loss:{},lbox:{},llane:{}'.format(loss.shape,lbox.shape,llane.shape))
 
-            #校验各个部分的准确率
-            lane_mask=(lane_targets==1)
-            # print('lane pixel:{}'.format(torch.where(lane_mask==True)))
-            correct_pre = (torch.sigmoid(lane_pre[lane_mask]) > 0.7)
-            correct_pre_num = correct_pre.sum()
-            lane_num = lane_mask.sum()
-            print('lane_num:{},correct_pre_num:{},percentage:{}'.format(lane_num,correct_pre_num,correct_pre_num/lane_num))
-            
-            correct_unlane_pre = (torch.sigmoid(lane_pre[~lane_mask]) < 0.5)
-            correct_unlane_pre_num = correct_unlane_pre.sum()
-            unlane_num = (~lane_mask).sum()
-            print('unlane_num:{},correct_unlane_pre_num:{},percentage:{}'.format(unlane_num,correct_unlane_pre_num,correct_unlane_pre_num/unlane_num))
+            #对车道线点和非车道线点分别计算precision和recall
+            lane_pre_prob = torch.sigmoid(lane_pre)
+            lane_mask = (lane_targets==1)
+            unlane_mask = ~lane_mask
+            pre_lane_mask = (lane_pre_prob > 0.7)
+            pre_unlane_mask = (lane_pre_prob < 0.5)
 
-            lane_pre = torch.sigmoid(lane_pre)
-            print(lane_pre.shape)
-            lane_pre = lane_pre.float().cpu() #bchw
-            pre_mask=np.where(lane_pre > 0.7)
-            gray_label_img = np.zeros_like(lane_pre.detach().numpy())
-            gray_label_img[pre_mask] = 255
-            gray_label_img = gray_label_img.transpose(0,2,3,1)
-            cv2.imwrite('./pre_gray_label_img.png',gray_label_img[0,...])
+            pre_lane_correct = pre_lane_mask[lane_mask].sum()
+            pre_lane_num = pre_lane_mask.sum()
+            gt_lane_num = lane_mask.sum()
+            lane_precision = (0 if pre_lane_num== 0 else pre_lane_correct/pre_lane_num)
+            lane_recall = (0 if gt_lane_num== 0 else pre_lane_correct/gt_lane_num)
+            lane_f1 = (2 * lane_precision * lane_recall) / (lane_precision + lane_recall)
+            print('pre_lane_correct:{},pre_lane_num:{},gt_lane_num:{}'.format(pre_lane_correct,pre_lane_num,gt_lane_num))
+            print('lane precision:{},recall:{},f1:{}'.format(lane_precision,lane_recall,lane_f1))
 
-            #校验lane_targets是否正确
-            lane_targets = lane_targets.float().cpu() #bchw
-            pre_mask=np.where(lane_targets > 0.7)
-            gray_label_img = np.zeros_like(lane_targets.detach().numpy())
-            gray_label_img[pre_mask] = 255
-            gray_label_img = gray_label_img.transpose(0,2,3,1)
-            # cv2.imwrite('./lane_targets_img.png',gray_label_img[0,...])
+            pre_unlane_correct = pre_unlane_mask[unlane_mask].sum()
+            pre_unlane_num = pre_unlane_mask.sum()
+            gt_unlane_num = unlane_mask.sum()
+            print('pre_unlane_correct:{},pre_unlane_num:{},gt_lane_num:{}'.format(pre_unlane_correct,pre_unlane_num,gt_unlane_num))
+            print('unlane precision:{},recall:{}'.format(pre_unlane_correct/pre_unlane_num,pre_unlane_correct/gt_unlane_num))
+
+            #对车道线部分和非车道线部分分别计算loss
+            bceloss = nn.BCELoss()
+
+            with autocast(enabled=False):
+                lane_pre_justlane = torch.zeros_like(lane_pre_prob)
+                lane_pre_justlane[lane_mask] = lane_pre_prob[lane_mask]
+                
+                lane_pre_justunlane = torch.ones_like(lane_pre_prob)
+                lane_pre_justunlane[unlane_mask] = lane_pre_prob[unlane_mask]
+
+                lane_pre_justlane = lane_pre_justlane.type(torch.float)  
+                lane_loss = bceloss(lane_pre_justlane,lane_targets)            
+                print('车道线部分的loss:{}'.format(lane_loss))
+
+                lane_pre_justunlane = lane_pre_justunlane.type(torch.float)
+                unlane_loss = bceloss(lane_pre_justunlane,lane_targets)
+                print('非车道线部分的loss:{}'.format(unlane_loss))
+
+                #动态调整正样本比例
+                pos_weight = unlane_loss/lane_loss
+                # print('change pos_weight to {}'.format(pos_weight))
+                # self.BCEseg = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight],device=device))
 
         # print('loss:{},lbox:{}'.format(loss.shape,lbox.shape))
         return loss * bs, torch.cat((lbox, lobj, lcls, loss)).detach()
@@ -600,6 +620,51 @@ class ComputeLoss:
 
         return tcls, tbox, indices, anch
 
+    def update_pos_weight(self,pos_weight):
+        self.seg_pw = pos_weight
+
+    def save_prediction_img(imgs,lane_pre,lane_gt,epoch,batch):
+        save_dir='train_results/{}/{}'.format(epoch,batch)
+        isExist = os.path.exists(save_dir)
+        if not isExist:
+            # Create a new directory because it does not exist
+            os.makedirs(save_dir)
+            # print("The new directory is created!")
+
+        imgs = imgs.float().cpu() #bchw
+        lane_pre = lane_pre.float().cpu()
+        lane_gt = lane_gt.float().cpu()
+        result_images = imgs.permute(0,2,3,1).detach().numpy().astype(np.float32) #bhwc rgb
+        gt_images = result_images.copy()
+        # lane = lane.float().cpu() #bchw
+
+        b,_,_,_ = lane_gt.shape
+        for i in range(b):  
+            current_gt_lane = lane_gt[i]
+            gt_lane_mask = np.where(current_gt_lane==1)
+
+            current_lane_pre = torch.sigmoid(lane_pre[i,...])
+            current_lane_pre_mask = np.where(lane_pre>0.7)
+            
+            result_image = result_images[i] * 255 #float32 to uint8
+            result_image = result_image[...,::-1] # rgb to bgr      
+            result_image[current_lane_pre_mask[1],current_lane_pre_mask[2],0] = 0
+            result_image[current_lane_pre_mask[1],current_lane_pre_mask[2],1] = 0
+            result_image[current_lane_pre_mask[1],current_lane_pre_mask[2],2] = 255 
+
+            save_img_name=None
+            save_img_name = '{}/{}_pre.jpg'.format(save_dir,i)
+            # print('save_img_name:{}'.format(save_img_name))
+            cv2.imwrite(save_img_name,result_image)
+
+            gt_image = gt_images[i] * 255
+            gt_image = gt_image[...,::-1] # rgb to bgr      
+            gt_image[gt_lane_mask[1],gt_lane_mask[2],0] = 0
+            gt_image[gt_lane_mask[1],gt_lane_mask[2],1] = 0
+            gt_image[gt_lane_mask[1],gt_lane_mask[2],2] = 255 
+            save_img_name = '{}/{}_gt.jpg'.format(save_dir,i)
+            # print('save_img_name:{}'.format(save_img_name))
+            cv2.imwrite(save_img_name,gt_image)
 
 class ComputeLossOTA:
     # Compute losses

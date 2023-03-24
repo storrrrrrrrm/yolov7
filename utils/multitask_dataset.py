@@ -11,6 +11,7 @@ from itertools import repeat
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from threading import Thread
+from tkinter import FALSE
 
 import cv2
 import numpy as np
@@ -560,12 +561,37 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             if labels.size:  # normalized xywh to pixel xyxy format
                 labels[:, 1:] = xywhn2xyxy(labels[:, 1:], ratio[0] * w, ratio[1] * h, padw=pad[0], padh=pad[1])
 
-        line_path = self.img_files[index].replace('ColorImage','Label').replace('.jpg','_bin.png')
+        # apollo  dataset
+        # line_path = self.img_files[index].replace('ColorImage','Label').replace('.jpg','_bin.png')
+        # line_img = cv2.imread(line_path)
+        # line_img, ratio, pad = letterbox(line_img, shape, auto=False, scaleup=self.augment)
+        
+        # banqiao dataset
+        BANQIAO_FLAG=True
+        line_path = self.img_files[index].replace('Image','Label').replace('.png','_bin.png')
         line_img = cv2.imread(line_path)
+        line_img, ratio, pad = letterbox(line_img, shape, auto=False, scaleup=self.augment)
+
+
+        #专门为板桥数据单独处理
+        """
+        在生成板桥数据的时候,在letterbox时会resize,插值后会导致line_img不再是一个binary的图片,这个问题在apollo数据集影响
+        很小,因为apollo数据集的分辨率非常高,标注的很好,插值影响不大.
+
+        后面的random_perspective把原图旋转缩放,放到画面的不同位置.也会需要插值.
+
+        
+        """
+        # img_path=self.img_files[index]
+        # details=img_path.split('/')
+        # save_name = './label_{}'.format(details[-1])
+        # cv2.imwrite(save_name,line_img)
+
+
 
         if self.augment:
             # Augment imagespace
-            if not mosaic:
+            if not mosaic and not BANQIAO_FLAG:
                 print('*********random_perspective**********')
                 # img, labels = random_perspective(img, labels,
                 #                                  degrees=hyp['degrees'],
@@ -573,19 +599,23 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 #                                  scale=hyp['scale'],
                 #                                  shear=hyp['shear'],
                 #                                  perspective=hyp['perspective'])
+                
+                
                 img, labels,line_img = random_perspective(img, line_img,labels,
                                                  degrees=hyp['degrees'],
                                                  translate=hyp['translate'],
                                                  scale=hyp['scale'],
                                                  shear=hyp['shear'],
                                                  perspective=hyp['perspective'])
-            
-            
+            #     img_path=self.img_files[index]
+            #     details=img_path.split('/')
+            #     save_name = './label_{}'.format(details[-1])
+            #     cv2.imwrite(save_name,line_img)
             #img, labels = self.albumentations(img, labels)
 
             # Augment colorspace
             # 注意会改变像素值.
-            # augment_hsv(img, hgain=hyp['hsv_h'], sgain=hyp['hsv_s'], vgain=hyp['hsv_v'])
+            augment_hsv(img, hgain=hyp['hsv_h'], sgain=hyp['hsv_s'], vgain=hyp['hsv_v'])
             # print('****************do augment_hsv*******************')
 
             # Apply cutouts
@@ -632,17 +662,28 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         img = np.ascontiguousarray(img)
 
         if self.isLane:
-            lane_labels_out = torch.zeros((1, 640,640)) #构建一个二分类 chw
+            # print('line_img shape:{}'.format(line_img.shape))
+            # cv2.imwrite('./line.png',line_img)
+            # img_path=self.img_files[index]
+            # details=img_path.split('/')
+            # save_name = './label_{}'.format(details[-1])
+            # cv2.imwrite(save_name,line_img)
+            
+            lane_labels_out = torch.zeros((1, line_img.shape[0],line_img.shape[1])) #构建一个二分类 chw
             # lane_labels_out[1,...] = 1.
 
             # label_path = self.img_files[index].replace('ColorImage','Label').replace('.jpg','_bin.png')
             # label_img = cv2.imread(label_path)
-            # print('img_files:{},index:{}'.format(self.img_files,index))
+              # print('img_files:{},index:{}'.format(self.img_files,index))
             # print('read {}'.format(label_path))
             shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
             #做完letterbox后,由于做了resize,插值会导致像素亮度值的改变.
-            letter_label_img, _, _ = letterbox(line_img, shape,auto=False, scaleup=self.augment)
-            # cv2.imwrite('./label_img.png',letter_label_img)
+            # letter_label_img, _, _ = letterbox(line_img, shape,auto=False, scaleup=self.augment)
+            letter_label_img = line_img
+            # img_path=self.img_files[index]
+            # details=img_path.split('/')
+            # save_name = './label_{}'.format(details[-1])
+            # cv2.imwrite(save_name,letter_label_img)
             LANE_COLOR = [((8,35,142)),(43,173,180)] #bgr order
             for color in LANE_COLOR:
                 h_idx,w_idx = np.where((letter_label_img == color).all(axis=2)) 
@@ -653,7 +694,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             gray_label_img = lane_labels_out.permute(1, 2, 0).numpy()
             # print('gray_label_img:{}'.format(gray_label_img))
             gray_label_img = 255 * gray_label_img
-            # cv2.imwrite('./gray_label_img.png',gray_label_img)
+            cv2.imwrite('./gray_label_img.png',gray_label_img)
 
             #校验数据增强后的输入图片     
             
@@ -1077,6 +1118,7 @@ def letterbox(img, new_shape=(640, 640), color=(114, 114, 114), auto=True, scale
     top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
     left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
     img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)  # add border
+    # print('dw:{},dh:{}'.format(dw,dh))
     return img, ratio, (dw, dh)
 
 

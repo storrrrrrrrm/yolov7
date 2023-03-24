@@ -11,6 +11,7 @@ from pathlib import Path
 from threading import Thread
 
 import numpy as np
+from scipy.fftpack import ss_diff
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
@@ -390,13 +391,17 @@ def train(hyp, opt, device, tb_writer=None):
                     loss, loss_items = compute_loss_ota(pred, targets.to(device), imgs)  # loss scaled by batch_size
                 else:
                     multi_targets = [e.to(device) for e in multi_targets]
-                    pos_weight = exponential_decay(epoch,200,100,1) #从200衰减到1,共计100epoch
+                    # pos_weight = exponential_decay(epoch,200,100,1) #从200衰减到1,共计100epoch
+                    # 板桥数据recall不行,加大pos样本权重
+                    pos_weight = exponential_decay(epoch,2000,100,100) #从200衰减到1,共计100epoch                    
                     if pos_weight > 1:
                         compute_loss.update_pos_weight(pos_weight)
-                    loss, loss_items = compute_loss(pred, multi_targets,withLaneLoss=True)  # loss scaled by batch_size
+                    # print(multi_targets)
+                    loss, loss_items,lane_items = compute_loss(pred, multi_targets,withLaneLoss=True)  # loss scaled by batch_size
+                    print('lane_items:{}'.format(lane_items))
 
                     #隔一段时间绘制一次预测结果图
-                    if i%1 == 0:
+                    if epoch%10 == 0:
                         _,lane_pre = pred[0],pred[1] #lane 2x640x640
                         _,lane_gt = multi_targets[0],multi_targets[1]
                         save_prediction_img(imgs,lane_pre,lane_gt,epoch,i)
@@ -466,6 +471,12 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Write
             with open(results_file, 'a') as f:
+                line_static_s = ''
+                for e in lane_items:
+                    e = '%.3f' % e
+                    print(e)
+                    line_static_s += ('{} '.format(e))
+                s = line_static_s + s
                 f.write(s + '%10.4g' * 7 % results + '\n')  # append metrics, val_loss
             if len(opt.name) and opt.bucket:
                 os.system('gsutil cp %s gs://%s/results/results%s.txt' % (results_file, opt.bucket, opt.name))
@@ -622,8 +633,9 @@ def exponential_decay(t, init=0.8, m=30, finish=0.2):
 if __name__ == '__main__':
     """
     本机conda环境:SMOKE
-    训练机环境:base
+    训练机环境:orin_work
     python train.py --workers 8 --device 0 --batch-size 1 --data data/coco.yaml --img 640 640 --cfg cfg/training/yolov7.yaml --weights '' --name yolov7 --hyp data/hyp.scratch.p5.yaml --notest --evolve
+    python train.py --data data/banqiao.yaml --img 960  --cfg cfg/multihead.yaml --hyp data/hyp.lane_banqiao.yaml 
     """
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', type=str, default='yolov7.pt', help='initial weights path')

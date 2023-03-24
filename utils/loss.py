@@ -563,7 +563,7 @@ class ComputeLoss:
                 # self.BCEseg = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight],device=device))
 
         # print('loss:{},lbox:{}'.format(loss.shape,lbox.shape))
-        return loss * bs, torch.cat((lbox, lobj, lcls, loss)).detach()
+        return loss * bs, torch.cat((lbox, lobj, lcls, loss)).detach(),(lane_precision.item(),lane_recall.item(),lane_f1.item())
 
     def build_targets(self, p, targets):
         # Build targets for compute_loss(), input targets(image,class,x,y,w,h)

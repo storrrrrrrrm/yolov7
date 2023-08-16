@@ -11,7 +11,7 @@ from itertools import repeat
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from threading import Thread
-from tkinter import FALSE
+# from tkinter import FALSE
 
 import cv2
 import numpy as np
@@ -30,6 +30,8 @@ from torchvision.ops import roi_pool, roi_align, ps_roi_pool, ps_roi_align
 from utils.general import check_requirements, xyxy2xywh, xywh2xyxy, xywhn2xyxy, xyn2xy, segment2box, segments2boxes, \
     resample_segments, clean_str
 from utils.torch_utils import torch_distributed_zero_first
+
+from .banqiao_dataset import imgpath2labelpath,COLOR_MAP,load_label,load_label_letterbox
 
 # Parameters
 help_url = 'https://github.com/ultralytics/yolov5/wiki/Train-Custom-Data'
@@ -64,7 +66,7 @@ def exif_size(img):
 
 
 def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=False, cache=False, pad=0.0, rect=False,
-                      rank=-1, world_size=1, workers=8, image_weights=False, quad=False, prefix='',isLane=True):
+                      rank=-1, world_size=1, workers=8, image_weights=False, quad=False, prefix='',isLane=True,isTest=False):
     # Make sure only the first process in DDP process the dataset first, and the following others can use the cache
     with torch_distributed_zero_first(rank):
         dataset = LoadImagesAndLabels(path, imgsz, batch_size,
@@ -77,20 +79,33 @@ def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=Fa
                                       pad=pad,
                                       image_weights=image_weights,
                                       prefix=prefix,
-                                      isLane=True)
+                                      isLane=isLane,
+                                      isTest=isTest
+                                      )
 
     batch_size = min(batch_size, len(dataset))
-    nw = min([os.cpu_count() // world_size, batch_size if batch_size > 1 else 0, workers])  # number of workers
-    sampler = torch.utils.data.distributed.DistributedSampler(dataset) if rank != -1 else None
-    loader = torch.utils.data.DataLoader if image_weights else InfiniteDataLoader
-    # Use torch.utils.data.DataLoader() if dataset.properties will update during training else InfiniteDataLoader()
-    # loader = torch.utils.data.DataLoader
-    dataloader = loader(dataset,
+    if not isTest:
+        nw = min([os.cpu_count() // world_size, batch_size if batch_size > 1 else 0, workers])  # number of workers
+        sampler = torch.utils.data.distributed.DistributedSampler(dataset) if rank != -1 else None
+        loader = torch.utils.data.DataLoader if image_weights else InfiniteDataLoader
+        dataloader = loader(dataset,
                         batch_size=batch_size,
                         num_workers=nw,
                         sampler=sampler,
                         pin_memory=True,
                         collate_fn=LoadImagesAndLabels.collate_fn4 if quad else LoadImagesAndLabels.collate_fn)
+    else:
+        print('workers is 1-------------------')
+        nw = 8
+        sampler = torch.utils.data.SequentialSampler(dataset)
+        dataloader = torch.utils.data.DataLoader(dataset,batch_size=16,sampler=sampler,num_workers=nw)
+
+    
+    # Use torch.utils.data.DataLoader() if dataset.properties will update during training else InfiniteDataLoader()
+    # loader = torch.utils.data.DataLoader
+    
+
+    print('nw : {}'.format(nw))
     print('sampler : {}'.format(sampler))
     print('quad : {}'.format(quad))
     print('dataloader is :{}'.format(dataloader))
@@ -350,15 +365,19 @@ class LoadStreams:  # multiple IP or RTSP cameras
         return 0  # 1E12 frames = 32 streams at 30 FPS for 30 years
 
 
+# def img2label_paths(img_paths):
+#     # Define label paths as a function of image paths
+#     sa, sb = os.sep + 'images' + os.sep, os.sep + 'labels' + os.sep  # /images/, /labels/ substrings
+#     return ['txt'.join(x.replace(sa, sb, 1).rsplit(x.split('.')[-1], 1)) for x in img_paths]
+
 def img2label_paths(img_paths):
-    # Define label paths as a function of image paths
-    sa, sb = os.sep + 'images' + os.sep, os.sep + 'labels' + os.sep  # /images/, /labels/ substrings
-    return ['txt'.join(x.replace(sa, sb, 1).rsplit(x.split('.')[-1], 1)) for x in img_paths]
+    return [imgpath2labelpath(x) for x in img_paths]
 
-
+import albumentations as A
 class LoadImagesAndLabels(Dataset):  # for training/testing
     def __init__(self, path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
-                 cache_images=False, single_cls=False, stride=32, pad=0.0, prefix='',isLane=False):
+                 cache_images=False, single_cls=False, stride=32, pad=0.0, prefix='',isLane=False,isTest=False):
+        print('batch_size',batch_size)
         self.isLane=isLane
         self.img_size = img_size
         self.augment = augment
@@ -372,7 +391,6 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         #self.albumentations = Albumentations() if augment else None
 
         print('augment:{},rect:{}'.format(self.augment,self.rect))
-
 
         try:
             f = []  # image files
@@ -390,6 +408,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 else:
                     raise Exception(f'{prefix}{p} does not exist')
             self.img_files = sorted([x.replace('/', os.sep) for x in f if x.split('.')[-1].lower() in img_formats])
+            # print(self.img_files)
             # self.img_files = sorted([x for x in f if x.suffix[1:].lower() in img_formats])  # pathlib
             assert self.img_files, f'{prefix}No images found'
         except Exception as e:
@@ -397,7 +416,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
         # Check cache
         self.label_files = img2label_paths(self.img_files)  # labels
-        print('label_files:{}'.format(self.label_files))
+        # print('label_files:{}'.format(self.label_files))
         cache_path = (p if p.is_file() else Path(self.label_files[0]).parent).with_suffix('.cache')  # cached labels
         print('cache_path:{}'.format(cache_path))
         if cache_path.is_file():
@@ -434,12 +453,15 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.indices = range(n)
         print('self.indices : {}'.format(self.indices))
 
-        # Rectangular Training
+        #Rectangular Training
         if self.rect:
             # Sort by aspect ratio
             s = self.shapes  # wh
             ar = s[:, 1] / s[:, 0]  # aspect ratio
-            irect = ar.argsort()
+            if not isTest:
+                irect = ar.argsort()
+            else:
+                irect = range(len(ar))
             self.img_files = [self.img_files[i] for i in irect]
             self.label_files = [self.label_files[i] for i in irect]
             self.labels = [self.labels[i] for i in irect]
@@ -477,27 +499,38 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 assert im.format.lower() in img_formats, f'invalid image format {im.format}'
 
                 # verify labels
+                # if os.path.isfile(lb_file):
+                #     nf += 1  # label found
+                #     with open(lb_file, 'r') as f:
+                #         l = [x.split() for x in f.read().strip().splitlines()]
+                #         if any([len(x) > 8 for x in l]):  # is segment
+                #             classes = np.array([x[0] for x in l], dtype=np.float32)
+                #             segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in l]  # (cls, xy1...)
+                #             l = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)  # (cls, xywh)
+                #         l = np.array(l, dtype=np.float32)
+                #     if len(l):
+                #         assert l.shape[1] == 5, 'labels require 5 columns each'
+                #         assert (l >= 0).all(), 'negative labels'
+                #         assert (l[:, 1:] <= 1).all(), 'non-normalized or out of bounds coordinate labels'
+                #         assert np.unique(l, axis=0).shape[0] == l.shape[0], 'duplicate labels'
+                #     else:
+                #         ne += 1  # label empty
+                #         l = np.zeros((0, 5), dtype=np.float32)
+                # else:
+                #     nm += 1  # label missing
+                #     l = np.zeros((0, 5), dtype=np.float32)
+                # x[im_file] = [l, shape, segments]
+
+                #verify labels
                 if os.path.isfile(lb_file):
                     nf += 1  # label found
-                    with open(lb_file, 'r') as f:
-                        l = [x.split() for x in f.read().strip().splitlines()]
-                        if any([len(x) > 8 for x in l]):  # is segment
-                            classes = np.array([x[0] for x in l], dtype=np.float32)
-                            segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in l]  # (cls, xy1...)
-                            l = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)  # (cls, xywh)
-                        l = np.array(l, dtype=np.float32)
-                    if len(l):
-                        assert l.shape[1] == 5, 'labels require 5 columns each'
-                        assert (l >= 0).all(), 'negative labels'
-                        assert (l[:, 1:] <= 1).all(), 'non-normalized or out of bounds coordinate labels'
-                        assert np.unique(l, axis=0).shape[0] == l.shape[0], 'duplicate labels'
-                    else:
-                        ne += 1  # label empty
-                        l = np.zeros((0, 5), dtype=np.float32)
+                    mask = load_label(lb_file)
                 else:
                     nm += 1  # label missing
-                    l = np.zeros((0, 5), dtype=np.float32)
-                x[im_file] = [l, shape, segments]
+                l = np.zeros((0, 5), dtype=np.float32)
+                x[im_file] = [l, shape, mask]
+
+
             except Exception as e:
                 nc += 1
                 print(f'{prefix}WARNING: Ignoring corrupted image and/or label {im_file}: {e}')
@@ -526,6 +559,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
     #     return self
 
     def __getitem__(self, index):
+        # print('index:{},path:{}'.format(index,self.img_files[index]))
         index = self.indices[index]  # linear, shuffled, or image_weights
 
         hyp = self.hyp
@@ -547,7 +581,6 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 r = np.random.beta(8.0, 8.0)  # mixup ratio, alpha=beta=8.0
                 img = (img * r + img2 * (1 - r)).astype(np.uint8)
                 labels = np.concatenate((labels, labels2), 0)
-
         else:
             # Load image
             img, (h0, w0), (h, w) = load_image(self, index)
@@ -568,9 +601,9 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         
         # banqiao dataset
         BANQIAO_FLAG=True
-        line_path = self.img_files[index].replace('Image','Label').replace('.png','_bin.png')
-        line_img = cv2.imread(line_path)
-        line_img, ratio, pad = letterbox(line_img, shape, auto=False, scaleup=self.augment)
+        # line_path = imgpath2labelpath(self.img_files[index])
+        # line_img = cv2.imread(line_path)
+        # line_img, ratio, pad = letterbox(line_img, shape, auto=False, scaleup=self.augment)
 
 
         #专门为板桥数据单独处理
@@ -579,45 +612,32 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         很小,因为apollo数据集的分辨率非常高,标注的很好,插值影响不大.
 
         后面的random_perspective把原图旋转缩放,放到画面的不同位置.也会需要插值.
-
-        
         """
-        # img_path=self.img_files[index]
-        # details=img_path.split('/')
-        # save_name = './label_{}'.format(details[-1])
-        # cv2.imwrite(save_name,line_img)
-
-
 
         if self.augment:
             # Augment imagespace
             if not mosaic and not BANQIAO_FLAG:
-                print('*********random_perspective**********')
-                # img, labels = random_perspective(img, labels,
-                #                                  degrees=hyp['degrees'],
-                #                                  translate=hyp['translate'],
-                #                                  scale=hyp['scale'],
-                #                                  shear=hyp['shear'],
-                #                                  perspective=hyp['perspective'])
-                
-                
+                print('*********random_perspective**********')                
                 img, labels,line_img = random_perspective(img, line_img,labels,
                                                  degrees=hyp['degrees'],
                                                  translate=hyp['translate'],
                                                  scale=hyp['scale'],
                                                  shear=hyp['shear'],
                                                  perspective=hyp['perspective'])
-            #     img_path=self.img_files[index]
-            #     details=img_path.split('/')
-            #     save_name = './label_{}'.format(details[-1])
-            #     cv2.imwrite(save_name,line_img)
-            #img, labels = self.albumentations(img, labels)
 
             # Augment colorspace
-            # 注意会改变像素值.
             augment_hsv(img, hgain=hyp['hsv_h'], sgain=hyp['hsv_s'], vgain=hyp['hsv_v'])
-            # print('****************do augment_hsv*******************')
-
+            T = [
+                A.Blur(p=0.01),
+                A.MedianBlur(p=0.01),
+                A.CLAHE(p=0.01),
+                A.RandomBrightnessContrast(p=0.0),
+                A.RandomGamma(p=0.0),
+                A.ImageCompression(quality_lower=75, p=0.0)]  # transforms
+            transform = A.Compose(T)
+            new = transform(image = img)
+            img = new['image']
+            
             # Apply cutouts
             # if random.random() < 0.9:
             #     labels = cutout(img, labels)
@@ -662,55 +682,43 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         img = np.ascontiguousarray(img)
 
         if self.isLane:
-            # print('line_img shape:{}'.format(line_img.shape))
-            # cv2.imwrite('./line.png',line_img)
-            # img_path=self.img_files[index]
-            # details=img_path.split('/')
-            # save_name = './label_{}'.format(details[-1])
-            # cv2.imwrite(save_name,line_img)
-            
-            lane_labels_out = torch.zeros((1, line_img.shape[0],line_img.shape[1])) #构建一个二分类 chw
-            # lane_labels_out[1,...] = 1.
-
-            # label_path = self.img_files[index].replace('ColorImage','Label').replace('.jpg','_bin.png')
-            # label_img = cv2.imread(label_path)
-              # print('img_files:{},index:{}'.format(self.img_files,index))
-            # print('read {}'.format(label_path))
             shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
             #做完letterbox后,由于做了resize,插值会导致像素亮度值的改变.
             # letter_label_img, _, _ = letterbox(line_img, shape,auto=False, scaleup=self.augment)
-            letter_label_img = line_img
+            # letter_label_img = line_img
             # img_path=self.img_files[index]
             # details=img_path.split('/')
             # save_name = './label_{}'.format(details[-1])
             # cv2.imwrite(save_name,letter_label_img)
-            LANE_COLOR = [((8,35,142)),(43,173,180)] #bgr order
-            for color in LANE_COLOR:
-                h_idx,w_idx = np.where((letter_label_img == color).all(axis=2)) 
-                # print('h_idx:{},w_idx:{}'.format(h_idx,w_idx))
-                lane_labels_out[0,h_idx,w_idx] = 1 
-                # lane_labels_out[1,h_idx,w_idx] = 0 
+
+            # lane_labels_out = load_label(self.label_files[index])
+            lane_labels_out = load_label_letterbox(self.label_files[index],shape,scaleup=self.augment)
+            cls_num,_,_ =  lane_labels_out.shape
+            # for i in range(cls_num):
+            #     gt_cls_num = (lane_labels_out[i,...] == 1).sum()
+            #     gt_uncls_num = (lane_labels_out[i,...] == 0).sum()
+            #     print('cls_id:{},gt_cls_num:{},gt_uncls_num:{}'.format(i,gt_cls_num,gt_uncls_num))
 
             gray_label_img = lane_labels_out.permute(1, 2, 0).numpy()
             # print('gray_label_img:{}'.format(gray_label_img))
             gray_label_img = 255 * gray_label_img
-            cv2.imwrite('./gray_label_img.png',gray_label_img)
+            # cv2.imwrite('./gray_label_img.png',gray_label_img)
 
             #校验数据增强后的输入图片     
             
-            #校验lane_targets是否正确
-            gray_label_img = np.zeros_like(lane_labels_out)
-            lane_mask = np.where(lane_labels_out==1) 
-            gray_label_img[lane_mask] = 255
-            gray_label_img = gray_label_img.transpose(1,2,0)
+            # #校验lane_targets是否正确
+            # gray_label_img = np.zeros_like(lane_labels_out)
+            # lane_mask = np.where(lane_labels_out==1) 
+            # gray_label_img[lane_mask] = 255
+            # gray_label_img = gray_label_img.transpose(1,2,0)
 
-            # input_img = img.copy() #chw rgb
-            # input_img[0,lane_mask[1],lane_mask[2]] = 255
-            # input_img[1,lane_mask[1],lane_mask[2]] = 0 
-            # input_img[2,lane_mask[1],lane_mask[2]] = 0  
-            # input_img = input_img.transpose(1,2,0)[...,::-1] #hwc bgr
-            # save_name = './lane_input_img{}.png'.format(index)
-            # cv2.imwrite(save_name,input_img)
+            # # input_img = img.copy() #chw rgb
+            # # input_img[0,lane_mask[1],lane_mask[2]] = 255
+            # # input_img[1,lane_mask[1],lane_mask[2]] = 0 
+            # # input_img[2,lane_mask[1],lane_mask[2]] = 0  
+            # # input_img = input_img.transpose(1,2,0)[...,::-1] #hwc bgr
+            # # save_name = './lane_input_img{}.png'.format(index)
+            # # cv2.imwrite(save_name,input_img)
 
             return torch.from_numpy(img), [labels_out,lane_labels_out], self.img_files[index], shapes
         else:
@@ -1122,93 +1130,93 @@ def letterbox(img, new_shape=(640, 640), color=(114, 114, 114), auto=True, scale
     return img, ratio, (dw, dh)
 
 
-def random_perspective(img, targets=(), segments=(), degrees=10, translate=.1, scale=.1, shear=10, perspective=0.0,
-                       border=(0, 0)):
-    # torchvision.transforms.RandomAffine(degrees=(-10, 10), translate=(.1, .1), scale=(.9, 1.1), shear=(-10, 10))
-    # targets = [cls, xyxy]
+# def random_perspective(img, targets=(), segments=(), degrees=10, translate=.1, scale=.1, shear=10, perspective=0.0,
+#                        border=(0, 0)):
+#     # torchvision.transforms.RandomAffine(degrees=(-10, 10), translate=(.1, .1), scale=(.9, 1.1), shear=(-10, 10))
+#     # targets = [cls, xyxy]
 
-    height = img.shape[0] + border[0] * 2  # shape(h,w,c)
-    width = img.shape[1] + border[1] * 2
+#     height = img.shape[0] + border[0] * 2  # shape(h,w,c)
+#     width = img.shape[1] + border[1] * 2
 
-    # Center
-    C = np.eye(3)
-    C[0, 2] = -img.shape[1] / 2  # x translation (pixels)
-    C[1, 2] = -img.shape[0] / 2  # y translation (pixels)
+#     # Center
+#     C = np.eye(3)
+#     C[0, 2] = -img.shape[1] / 2  # x translation (pixels)
+#     C[1, 2] = -img.shape[0] / 2  # y translation (pixels)
 
-    # Perspective
-    P = np.eye(3)
-    P[2, 0] = random.uniform(-perspective, perspective)  # x perspective (about y)
-    P[2, 1] = random.uniform(-perspective, perspective)  # y perspective (about x)
+#     # Perspective
+#     P = np.eye(3)
+#     P[2, 0] = random.uniform(-perspective, perspective)  # x perspective (about y)
+#     P[2, 1] = random.uniform(-perspective, perspective)  # y perspective (about x)
 
-    # Rotation and Scale
-    R = np.eye(3)
-    a = random.uniform(-degrees, degrees)
-    # a += random.choice([-180, -90, 0, 90])  # add 90deg rotations to small rotations
-    s = random.uniform(1 - scale, 1.1 + scale)
-    # s = 2 ** random.uniform(-scale, scale)
-    R[:2] = cv2.getRotationMatrix2D(angle=a, center=(0, 0), scale=s)
+#     # Rotation and Scale
+#     R = np.eye(3)
+#     a = random.uniform(-degrees, degrees)
+#     # a += random.choice([-180, -90, 0, 90])  # add 90deg rotations to small rotations
+#     s = random.uniform(1 - scale, 1.1 + scale)
+#     # s = 2 ** random.uniform(-scale, scale)
+#     R[:2] = cv2.getRotationMatrix2D(angle=a, center=(0, 0), scale=s)
 
-    # Shear
-    S = np.eye(3)
-    S[0, 1] = math.tan(random.uniform(-shear, shear) * math.pi / 180)  # x shear (deg)
-    S[1, 0] = math.tan(random.uniform(-shear, shear) * math.pi / 180)  # y shear (deg)
+#     # Shear
+#     S = np.eye(3)
+#     S[0, 1] = math.tan(random.uniform(-shear, shear) * math.pi / 180)  # x shear (deg)
+#     S[1, 0] = math.tan(random.uniform(-shear, shear) * math.pi / 180)  # y shear (deg)
 
-    # Translation
-    T = np.eye(3)
-    T[0, 2] = random.uniform(0.5 - translate, 0.5 + translate) * width  # x translation (pixels)
-    T[1, 2] = random.uniform(0.5 - translate, 0.5 + translate) * height  # y translation (pixels)
+#     # Translation
+#     T = np.eye(3)
+#     T[0, 2] = random.uniform(0.5 - translate, 0.5 + translate) * width  # x translation (pixels)
+#     T[1, 2] = random.uniform(0.5 - translate, 0.5 + translate) * height  # y translation (pixels)
 
-    # Combined rotation matrix
-    M = T @ S @ R @ P @ C  # order of operations (right to left) is IMPORTANT
-    if (border[0] != 0) or (border[1] != 0) or (M != np.eye(3)).any():  # image changed
-        if perspective:
-            img = cv2.warpPerspective(img, M, dsize=(width, height), borderValue=(114, 114, 114))
-        else:  # affine
-            img = cv2.warpAffine(img, M[:2], dsize=(width, height), borderValue=(114, 114, 114))
+#     # Combined rotation matrix
+#     M = T @ S @ R @ P @ C  # order of operations (right to left) is IMPORTANT
+#     if (border[0] != 0) or (border[1] != 0) or (M != np.eye(3)).any():  # image changed
+#         if perspective:
+#             img = cv2.warpPerspective(img, M, dsize=(width, height), borderValue=(114, 114, 114))
+#         else:  # affine
+#             img = cv2.warpAffine(img, M[:2], dsize=(width, height), borderValue=(114, 114, 114))
 
-    # Visualize
-    # import matplotlib.pyplot as plt
-    # ax = plt.subplots(1, 2, figsize=(12, 6))[1].ravel()
-    # ax[0].imshow(img[:, :, ::-1])  # base
-    # ax[1].imshow(img2[:, :, ::-1])  # warped
+#     # Visualize
+#     # import matplotlib.pyplot as plt
+#     # ax = plt.subplots(1, 2, figsize=(12, 6))[1].ravel()
+#     # ax[0].imshow(img[:, :, ::-1])  # base
+#     # ax[1].imshow(img2[:, :, ::-1])  # warped
 
-    # Transform label coordinates
-    n = len(targets)
-    if n:
-        use_segments = any(x.any() for x in segments)
-        new = np.zeros((n, 4))
-        if use_segments:  # warp segments
-            segments = resample_segments(segments)  # upsample
-            for i, segment in enumerate(segments):
-                xy = np.ones((len(segment), 3))
-                xy[:, :2] = segment
-                xy = xy @ M.T  # transform
-                xy = xy[:, :2] / xy[:, 2:3] if perspective else xy[:, :2]  # perspective rescale or affine
+#     # Transform label coordinates
+#     n = len(targets)
+#     if n:
+#         use_segments = any(x.any() for x in segments)
+#         new = np.zeros((n, 4))
+#         if use_segments:  # warp segments
+#             segments = resample_segments(segments)  # upsample
+#             for i, segment in enumerate(segments):
+#                 xy = np.ones((len(segment), 3))
+#                 xy[:, :2] = segment
+#                 xy = xy @ M.T  # transform
+#                 xy = xy[:, :2] / xy[:, 2:3] if perspective else xy[:, :2]  # perspective rescale or affine
 
-                # clip
-                new[i] = segment2box(xy, width, height)
+#                 # clip
+#                 new[i] = segment2box(xy, width, height)
 
-        else:  # warp boxes
-            xy = np.ones((n * 4, 3))
-            xy[:, :2] = targets[:, [1, 2, 3, 4, 1, 4, 3, 2]].reshape(n * 4, 2)  # x1y1, x2y2, x1y2, x2y1
-            xy = xy @ M.T  # transform
-            xy = (xy[:, :2] / xy[:, 2:3] if perspective else xy[:, :2]).reshape(n, 8)  # perspective rescale or affine
+#         else:  # warp boxes
+#             xy = np.ones((n * 4, 3))
+#             xy[:, :2] = targets[:, [1, 2, 3, 4, 1, 4, 3, 2]].reshape(n * 4, 2)  # x1y1, x2y2, x1y2, x2y1
+#             xy = xy @ M.T  # transform
+#             xy = (xy[:, :2] / xy[:, 2:3] if perspective else xy[:, :2]).reshape(n, 8)  # perspective rescale or affine
 
-            # create new boxes
-            x = xy[:, [0, 2, 4, 6]]
-            y = xy[:, [1, 3, 5, 7]]
-            new = np.concatenate((x.min(1), y.min(1), x.max(1), y.max(1))).reshape(4, n).T
+#             # create new boxes
+#             x = xy[:, [0, 2, 4, 6]]
+#             y = xy[:, [1, 3, 5, 7]]
+#             new = np.concatenate((x.min(1), y.min(1), x.max(1), y.max(1))).reshape(4, n).T
 
-            # clip
-            new[:, [0, 2]] = new[:, [0, 2]].clip(0, width)
-            new[:, [1, 3]] = new[:, [1, 3]].clip(0, height)
+#             # clip
+#             new[:, [0, 2]] = new[:, [0, 2]].clip(0, width)
+#             new[:, [1, 3]] = new[:, [1, 3]].clip(0, height)
 
-        # filter candidates
-        i = box_candidates(box1=targets[:, 1:5].T * s, box2=new.T, area_thr=0.01 if use_segments else 0.10)
-        targets = targets[i]
-        targets[:, 1:5] = new[i]
+#         # filter candidates
+#         i = box_candidates(box1=targets[:, 1:5].T * s, box2=new.T, area_thr=0.01 if use_segments else 0.10)
+#         targets = targets[i]
+#         targets[:, 1:5] = new[i]
 
-    return img, targets
+#     return img, targets
 
 
 def random_perspective(img,line, targets=(), degrees=10, translate=.1, scale=.1, shear=10, perspective=0.0, border=(0, 0)):

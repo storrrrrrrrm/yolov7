@@ -119,6 +119,9 @@ class IDetect(nn.Module):
 
     def forward(self, x):
         # x = x.copy()  # for profiling
+        # for e in x:
+        #     print('IDetect:e shape:{}'.format(e.shape))
+
         z = []  # inference output
         self.training |= self.export
         for i in range(self.nl):
@@ -135,6 +138,9 @@ class IDetect(nn.Module):
                 y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i]) * self.stride[i]  # xy
                 y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh
                 z.append(y.view(bs, -1, self.no))
+
+        # for e in z:
+        #     print('e shape:{}'.format(e.shape)) 
 
         return x if self.training else (torch.cat(z, 1), x)
     
@@ -518,6 +524,8 @@ class Model(nn.Module):
             with open(cfg) as f:
                 self.yaml = yaml.load(f, Loader=yaml.SafeLoader)  # model dict
 
+        self.lane_seg_layer_idx = self.yaml['lane_seg_layer_idx']
+
         # Define model
         ch = self.yaml['ch'] = self.yaml.get('ch', ch)  # input channels
         if nc and nc != self.yaml['nc']:
@@ -604,7 +612,7 @@ class Model(nn.Module):
 
     def forward_once(self, x, profile=False):
         # print('forward_once x shape:{}'.format(x.shape))
-        lane_seg_layer_idx=109
+        # lane_seg_layer_idx=109
         lane_seg_head_out = None
         
         y, dt = [], []  # outputs
@@ -646,11 +654,19 @@ class Model(nn.Module):
 
             y.append(x if m.i in self.save else None)  # save output
 
-            if i == lane_seg_layer_idx:
+            if i == self.lane_seg_layer_idx:
                 # m=nn.Sigmoid()
                 lane_seg_head_out=x
                 # print('layer {} out shape {}'.format(i,lane_seg_head_out.shape))
-                
+            
+            # if torch.is_tensor(x):
+            #     print('layer {},x shape:{}'.format(i,x.shape))
+            # else:
+            #     print('layer {},type(x):{}'.format(i,type(x)))
+            #     # print()
+            #     if  isinstance(x, list):
+            #         for e in x:
+            #             print('x[..] shape: {}'.format(e.shape))
         if profile:
             print('%.1fms total' % sum(dt))
         
@@ -659,7 +675,12 @@ class Model(nn.Module):
         # print('total ops:{}GFLOPS'.format(total_ops))
 
         # print('type(x):{},type(lane_seg_head_out):{}'.format(type(x),type(lane_seg_head_out)))
-
+        # for e in x:
+        #     if isinstance(e, list):
+        #         for xxx in e:
+        #             print('Model: xxx shape:{}'.format(xxx.shape))
+        #     else:
+        #         print('Model: e shape:{}'.format(e.shape))
         return x,lane_seg_head_out
 
     def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
@@ -796,6 +817,10 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
                  SwinTransformer2Block, ST2CSPA, ST2CSPB, ST2CSPC]:
             c1, c2 = ch[f], args[0]
             # print('c1:{},c2:{}'.format(ch[f],args[0]))
+            if c2 == 'lane_cls_num':
+                c2 = d['lane_cls_num']
+                print('convert c2 to ',c2)
+
             if c2 != no and i != do_not_change_out_channel_layer_idx:  # if not output
                 c2 = make_divisible(c2 * gw, 8)
                 # print('layer {},change c2 from {} to {}'.format(i,args[0],c2))

@@ -1,0 +1,14 @@
+# COCO 2017 dataset http://cocodataset.org
+
+# download command/URL (optional)
+# download: bash ./scripts/get_coco.sh
+
+# train and val data as 1) directory: path/images/, 2) file: path/images.txt, or 3) list: [path1/images/, path2/images/]
+train: ./banqiao/banqiao_cam8M.txt  # 
+val: ./banqiao/banqiao_cam8M.txt   # 
+test: ./banqiao/banqiao_cam8M.txt   # 
+# number of classes
+nc: 1
+
+# class names
+names: ['car']

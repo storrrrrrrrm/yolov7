@@ -430,19 +430,24 @@ class ComputeLoss:
         h = model.hyp  # hyperparameters
 
         self.seg_pw = h['seg_pw']
+        seg_pw_cls = h['seg_pw_cls'].split(',')
+        self.seg_pw_cls = np.array([float(e) for e in seg_pw_cls])
 
         # Define criteria
         BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['cls_pw']], device=device))
         BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['obj_pw']], device=device))
         self.BCEseg = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['seg_pw']],device=device))
+      # self.BCEseg = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([self.seg_pw],device=device))
 
         # Class label smoothing https://arxiv.org/pdf/1902.04103.pdf eqn 3
         self.cp, self.cn = smooth_BCE(eps=h.get('label_smoothing', 0.0))  # positive, negative BCE targets
 
         # Focal loss
         g = h['fl_gamma']  # focal loss gamma
+        self.g = g
         if g > 0:
             BCEcls, BCEobj = FocalLoss(BCEcls, g), FocalLoss(BCEobj, g)
+            self.BCEseg = FocalLoss(self.BCEseg,g)
 
         det = model.module.model[-1] if is_parallel(model) else model.model[-1]  # Detect() module
         self.balance = {3: [4.0, 1.0, 0.4]}.get(det.nl, [4.0, 1.0, 0.25, 0.06, .02])  # P3-P7
@@ -509,61 +514,130 @@ class ComputeLoss:
         #lane seg loss
         llane = torch.zeros(1, device=device)
         if withLaneLoss:
-            self.BCEseg = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([self.seg_pw],device=device))
+            b,h,w,c = lane_targets.shape
+            cls_pos_weight = (self.seg_pw * self.seg_pw_cls).tolist()
+            
+            pos_weight = torch.tensor(cls_pos_weight,device=device).view(3,1,1)
+            self.BCEseg = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+            # if self.g > 0:
+            #     self.BCEseg = FocalLoss(self.BCEseg,self.g) #tested on banqiao,will reduce recall
+
             llane += self.BCEseg(lane_pre,lane_targets)
             
-            print('llane:{}'.format(llane))
+            # print('lane_pre shape:{},lane_targets shape:{},llane:{}'.format(lane_pre.shape,lane_targets.shape,llane))
 
             loss = llane
             # print('loss:{},lbox:{},llane:{}'.format(loss.shape,lbox.shape,llane.shape))
 
-            #对车道线点和非车道线点分别计算precision和recall
+            #
             lane_pre_prob = torch.sigmoid(lane_pre)
-            lane_mask = (lane_targets==1)
-            unlane_mask = ~lane_mask
-            pre_lane_mask = (lane_pre_prob > 0.7)
-            pre_unlane_mask = (lane_pre_prob < 0.5)
-
-            pre_lane_correct = pre_lane_mask[lane_mask].sum()
-            pre_lane_num = pre_lane_mask.sum()
-            gt_lane_num = lane_mask.sum()
-            lane_precision = (0 if pre_lane_num== 0 else pre_lane_correct/pre_lane_num)
-            lane_recall = (0 if gt_lane_num== 0 else pre_lane_correct/gt_lane_num)
-            lane_f1 = (2 * lane_precision * lane_recall) / (lane_precision + lane_recall)
-            print('pre_lane_correct:{},pre_lane_num:{},gt_lane_num:{}'.format(pre_lane_correct,pre_lane_num,gt_lane_num))
-            print('lane precision:{},recall:{},f1:{}'.format(lane_precision,lane_recall,lane_f1))
-
-            pre_unlane_correct = pre_unlane_mask[unlane_mask].sum()
-            pre_unlane_num = pre_unlane_mask.sum()
-            gt_unlane_num = unlane_mask.sum()
-            print('pre_unlane_correct:{},pre_unlane_num:{},gt_lane_num:{}'.format(pre_unlane_correct,pre_unlane_num,gt_unlane_num))
-            print('unlane precision:{},recall:{}'.format(pre_unlane_correct/pre_unlane_num,pre_unlane_correct/gt_unlane_num))
+            # cls_details = self.metric_lane_every_cls(lane_pre_prob,lane_targets)
+            cls_details = []
+            dice = self.metric_lane(lane_pre_prob,lane_targets)
 
             #对车道线部分和非车道线部分分别计算loss
-            bceloss = nn.BCELoss()
+            lane_point_loss,unlane_point_loss = self.check_loss(lane_pre_prob,lane_targets)
 
-            with autocast(enabled=False):
-                lane_pre_justlane = torch.zeros_like(lane_pre_prob)
-                lane_pre_justlane[lane_mask] = lane_pre_prob[lane_mask]
-                
-                lane_pre_justunlane = torch.ones_like(lane_pre_prob)
-                lane_pre_justunlane[unlane_mask] = lane_pre_prob[unlane_mask]
-
-                lane_pre_justlane = lane_pre_justlane.type(torch.float)  
-                lane_loss = bceloss(lane_pre_justlane,lane_targets)            
-                print('车道线部分的loss:{}'.format(lane_loss))
-
-                lane_pre_justunlane = lane_pre_justunlane.type(torch.float)
-                unlane_loss = bceloss(lane_pre_justunlane,lane_targets)
-                print('非车道线部分的loss:{}'.format(unlane_loss))
-
-                #动态调整正样本比例
-                pos_weight = unlane_loss/lane_loss
-                # print('change pos_weight to {}'.format(pos_weight))
-                # self.BCEseg = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight],device=device))
-
+            lane_deatils = (llane.detach().item(),lane_point_loss.detach().item(),unlane_point_loss.detach().item(),dice,cls_details)
         # print('loss:{},lbox:{}'.format(loss.shape,lbox.shape))
-        return loss * bs, torch.cat((lbox, lobj, lcls, loss)).detach(),(lane_precision.item(),lane_recall.item(),lane_f1.item())
+        return loss * bs, torch.cat((lbox, lobj, lcls, loss)).detach(),lane_deatils
+
+    def check_loss(self,lane_pre_prob,lane_targets):
+        """
+        分别计算目标(各种类型的线,实线,虚线,导流区...)和背景(除目标之外的所有像素)的loss
+        """
+        bceloss = nn.BCELoss()
+
+        lane_mask = (lane_targets==1)  
+        unlane_mask = ~lane_mask
+        with autocast(enabled=False):
+            lane_pre_justlane = torch.zeros_like(lane_pre_prob)
+            lane_pre_justlane[lane_mask] = lane_pre_prob[lane_mask]
+            
+            lane_pre_justunlane = torch.ones_like(lane_pre_prob)
+            lane_pre_justunlane[unlane_mask] = lane_pre_prob[unlane_mask]
+
+            lane_pre_justlane = lane_pre_justlane.type(torch.float)  
+            lane_loss = bceloss(lane_pre_justlane,lane_targets)            
+            
+            lane_pre_justunlane = lane_pre_justunlane.type(torch.float)
+            unlane_loss = bceloss(lane_pre_justunlane,lane_targets)
+
+        return lane_loss,unlane_loss
+        
+
+    def metric_lane_every_cls(self,lane_pre,lane_targets):
+        b,c,h,w = lane_pre.shape
+        ret = []
+        for i in range(c):
+            cls_pre = lane_pre[:,i,...] 
+            cls_gt = lane_targets[:,i,...]
+
+            gt_cls_num = (cls_gt == 1).sum()
+            gt_uncls_num = (cls_gt == 0).sum()
+            # print('cls_id:{},gt_cls_num:{},gt_uncls_num:{}'.format(i,gt_cls_num,gt_uncls_num))
+
+            TP = ((cls_pre > 0.7) & (cls_gt == 1)).sum()
+            FP = ((cls_pre > 0.7) & (cls_gt == 0)).sum()
+            TN = ((cls_pre < 0.5) & (cls_gt == 0)).sum()
+            FN = ((cls_pre < 0.5) & (cls_gt == 1)).sum()
+ 
+            precision = TP / (TP + FP)  #预测为车道线点,其中多少是对的
+            recall = TP / (TP + FN)     #真正的车道线点,其中多少被预测出来了
+
+            # print('TP:{},FP:{},TN:{},FN:{}'.format(TP,FP,TN,FN))
+            # print('precision:{},recall:{}'.format(precision,recall))
+
+            dice = self.metric_lane(cls_pre,cls_gt)
+            # print('dice:{}'.format(dice))
+
+            ret.append([precision,recall,dice])
+        
+        return ret
+
+    def metric_lane(self,lane_pre,lane_targets):
+        lane_pre[lane_pre > 0.7] = 1
+        lane_pre[lane_pre <= 0.7] = 0
+        lane_pre_cpu = lane_pre.float().cpu().detach().numpy().astype(np.float32)
+        lane_targets_cpu = lane_targets.float().cpu().detach().numpy().astype(np.float32)
+        intersection = np.logical_and(lane_targets_cpu, lane_pre_cpu)
+        dice = (2. * intersection.sum() + 1e-10) / (lane_targets_cpu.sum() + lane_pre_cpu.sum() + 1e-10)
+        # print('dice:{},type(dice)'.format(dice,type(dice)))
+        return dice
+
+
+    def binary_dice(self,s, g):
+        """
+        Dice 系数是一种集合相似度度量指标，通常用于计算两个样本的相似度，值的范围是 0 - 1,分割结果最好时值为 1,最差时值为 0
+        """
+        assert (len(s.shape) == len(g.shape))
+        prod = np.multiply(s, g)
+        s0 = prod.sum()
+        dice = (2.0 * s0 + 1e-10) / (s.sum() + g.sum() + 1e-10)
+        return dice
+
+
+    # def metric_lane(self,lane_pre,lane_targets):
+    #     """
+    #     写一个分割模型的评价函数. def metric_lane(lane_pre,lane_targets),其中lane_pre和lane_targets
+    #     的shape相同,比如均为[8,2,736,1280]. 其中lane_pre中的值为概率,范围在0-1之间,当概率>0.7时,认为预测正确,
+    #     lane_targets为真值,值只有0或者1.
+    #     """
+    #     lane_pre_prob = torch.sigmoid(lane_pre)
+    #     lane_mask = (lane_targets==1)
+    #     unlane_mask = ~lane_mask
+    #     pre_lane_mask = (lane_pre_prob > 0.7)
+    #     pre_unlane_mask = (lane_pre_prob < 0.5)
+
+    #     pre_lane_correct = pre_lane_mask[lane_mask].sum()
+    #     pre_lane_num = pre_lane_mask.sum()
+    #     gt_lane_num = lane_mask.sum()
+    #     lane_precision = (0 if pre_lane_num== 0 else pre_lane_correct/pre_lane_num)
+    #     lane_recall = (0 if gt_lane_num== 0 else pre_lane_correct/gt_lane_num)
+    #     lane_f1 = (2 * lane_precision * lane_recall) / (lane_precision + lane_recall)
+    #     print('pre_lane_correct:{},pre_lane_num:{},gt_lane_num:{}'.format(pre_lane_correct,pre_lane_num,gt_lane_num))
+    #     print('lane precision:{},recall:{},f1:{}'.format(lane_precision,lane_recall,lane_f1))
+
 
     def build_targets(self, p, targets):
         # Build targets for compute_loss(), input targets(image,class,x,y,w,h)

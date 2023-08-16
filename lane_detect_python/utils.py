@@ -1,68 +1,56 @@
-from ast import If
+from ast import If, Return
 from distutils.debug import DEBUG
-from pickle import TRUE
+from pickle import FALSE, TRUE
 import cv2
 import numpy as np
 import os 
 import time
+import math
 
 PRINT_TIME_STATIC=True
+NEED_VISUALIZATION=True #是否将拟合的曲线绘制到原图
+SAVE_DEBUG_PNG = True 
+CURVE_THETA=True #是否需要将切线斜率转换成角度
 
-#8M相机 3840x2160
-# CAR_PIXEL_ON_FRONT = (1649,2157) #前视角图上的自车位置.
-# M_EVERY_PIXEL_ON_BEV = 0.1 #BEV图上的每个像素对应的距离,单位:米
-# Y_FOR_CAL_CURVATURE = [1000,1500,2000] #bev图上用来计算曲率的像素位置的y值.
-# LANE_PIXEL_LEN = 340 #透视图上一个车道宽度的像素个数　实际测出来
-
-# #8M相机 960x540
-# CAR_PIXEL_ON_FRONT = (480,540) #前视角图上的自车位置.
-# M_EVERY_PIXEL_ON_BEV = 0.1 #BEV图上的每个像素对应的距离,单位:米
-# Y_FOR_CAL_CURVATURE = [300,400,500] #bev图上用来计算曲率的像素位置的y值.
-# LANE_PIXEL_LEN = 34 #透视图上一个车道宽度的像素个数　实际测出来
-# LANE_THRESHOLD = 1.2 * LANE_PIXEL_LEN #控制bev图上　x方向上的搜索范围
-# WINDOW_SIZE_X = LANE_PIXEL_LEN #x方向滑窗的大小
-
-
-# #8M相机 1280x736
-# NEW_SIZE=(1280,736)
+#20230426 8M相机 1280x736
 # x = [468, 402, 778,722]
 # y = [462, 515, 515,461]
 # X = [400, 400, 550, 550] 
-# Y = [550, 600, 600, 550]
-# X_offset,Y_offset = 150,200 #手动调整找到合适的点
+# Y = [500, 550, 550, 500]
+# X_offset,Y_offset = 150,100 #手动调整找到合适的点
 # X = [e + X_offset for e in X] #
 # Y = [e + Y_offset for e in Y]
-# CAR_PIXEL_ON_FRONT = (640,736) #前视角图上的自车位置.
-# Y_FOR_CAL_CURVATURE = [300,400,500] #bev图上用来计算曲率的像素位置的y值.
-# LANE_PIXEL_LEN = X[2]-X[1] #透视图上一个车道宽度的像素个数
-# M_EVERY_PIXEL_ON_BEV = 3.5/LANE_PIXEL_LEN #BEV图上的每个像素对应的距离,单位:米
-# LANE_THRESHOLD = 1.2 * LANE_PIXEL_LEN #控制bev图上　x方向上的搜索范围
-# WINDOW_SIZE_X = int(LANE_PIXEL_LEN/2) #x方向滑窗的大小
+# src = np.floor(np.float32([[x[0], y[0]], [x[1], y[1]],[x[2], y[2]], [x[3], y[3]]]))
+# dst = np.floor(np.float32([[X[0], Y[0]], [X[1], Y[1]],[X[2], Y[2]], [X[3], Y[3]]]))
+# self.M = cv2.getPerspectiveTransform(src, dst)
+# self.M_inv = cv2.getPerspectiveTransform(dst, src)
 
-#20230426 1280x736
+
 NEW_SIZE=(1280,736)
-x = [468, 402, 778,722]
-y = [462, 515, 515,461]
-X = [400, 400, 550, 550] 
-Y = [500, 550, 550, 500]
-X_offset,Y_offset = 150,100 #手动调整找到合适的点
-X = [e + X_offset for e in X] #
-Y = [e + Y_offset for e in Y]
+H = np.array([[-0.1659823316008509, -1.87100288155966, 739.6450148427723],
+[4.402169850633356e-09, -2.205073584926861, 816.4599842909245],
+[8.890583548179584e-12, -0.002954215096412131, 1]],dtype=np.float)
+
+H_inv = np.array([[-6.024737554046832, 9.144261815093722, -3009.756760316751],
+[-8.317262657058759e-08, 4.832673024743682, -3945.684080347182],
+[-1.921463964429701e-10, 0.01427675552442364, -10.65639944907617]],dtype=np.float)
+
 CAR_PIXEL_ON_FRONT = (640,736) #前视角图上的自车位置.
 Y_FOR_CAL_CURVATURE = [300,400,500] #bev图上用来计算曲率的像素位置的y值.
-LANE_PIXEL_LEN = X[2]-X[1] #透视图上一个车道宽度的像素个数
+LANE_PIXEL_LEN = 150 #透视图上一个车道宽度的像素个数
 M_EVERY_PIXEL_ON_BEV = 3.5/LANE_PIXEL_LEN #BEV图上的每个像素对应的距离,单位:米
-LANE_THRESHOLD = 1.2 * LANE_PIXEL_LEN #控制bev图上　x方向上的搜索范围
-WINDOW_SIZE_X = int(LANE_PIXEL_LEN/2) #x方向滑窗的大小
 
-# 原2M相机
-# CAR_PIXEL_ON_FRONT = (2285,2697) #前视角图上的自车位置.
-# M_EVERY_PIXEL_ON_BEV = 0.1 #BEV图上的每个像素对应的距离,单位:米
-# Y_FOR_CAL_CURVATURE = [300,500,700] #bev图上用来计算曲率的像素位置的y值.
-# LANE_PIXEL_LEN = 300 #透视图上一个车道宽度的像素个数　实际测出来
+#fit_line相关控制参数
+# LANE_THRESHOLD = 1.2 * LANE_PIXEL_LEN #控制bev图上　x方向上的搜索范围
+LANE_THRESHOLD = 0.6 * LANE_PIXEL_LEN #控制bev图上　x方向上的搜索范围
+WINDOW_SIZE_X = int(LANE_PIXEL_LEN/3.) #x方向滑窗的大小
+FIT_LINE_H_START = int(NEW_SIZE[1] * 2./3)
+FIT_LINE_H_END = int(NEW_SIZE[1] * 95./100)
+CAM_CENTER_TO_LEFT = 1.5 #相机中心到车辆左侧边沿距离
+CAM_CENTER_TO_RIGHT = 0.3 #相机中心到车辆右侧边沿距离
 
-NEED_VISUALIZATION=TRUE #是否将拟合的曲线绘制到原图
-
+pre_search_left_x = None
+pre_search_right_x = None
 
 def letterbox(img, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleFill=False, scaleup=True, stride=32):
     # print('img.dtype:{},sum:{}'.format(img.dtype,np.sum(img)))
@@ -115,17 +103,68 @@ def warper(img, M):
 
     return warped
 
+def warp_imwrite(img_path,img):
+    if SAVE_DEBUG_PNG:
+        print('save img*********************************')
+        cv2.imwrite(img_path,img)
+
+def decide_serach_start_point(line_fit):
+    """
+    根据曲线方程line_fit推断出当前帧的搜索起点位置
+    line_fit暂时取上一帧的左车道线的方程
+    """
+    leftx_base,rightx_base = 0,0
+    y_bev = NEW_SIZE[1]
+    leftx_base = line_fit[0]*y_bev**2 + line_fit[1]*y_bev + line_fit[2]
+    rightx_base = leftx_base + LANE_PIXEL_LEN
+
+    return leftx_base,rightx_base
+
+def cal_search_base(pre_line_fit,img):
+    """
+    根据上一帧的曲线方程确定当前帧的搜索起点
+    """
+    k = 1 #　x = ky + b
+    for b in range(int(-LANE_THRESHOLD/2),int(LANE_THRESHOLD/2)):
+        lane_pixel_num = 0
+        for y in range(FIT_LINE_H_START,h):
+            x = ky + b
+            if (255 == img[y,x]):
+                lane_pixel_num +=1
+
+def get_search_base(binary_bev_img):
+    """
+    """     
+    if (pre_search_left_x is None) and (pre_search_right_x is None):
+        h,w = binary_bev_img.shape
+        histogram = np.sum(binary_bev_img[FIT_LINE_H_START:,:], axis=0) #图像下半部分每一列的非0像素个数  adjust this to avoid rotation
+        #print('histogram:{}'.format(histogram.shape))
+        midpoint = np.int32(histogram.shape[0]/2)#宽度的一半
+        
+        start = int(midpoint - LANE_THRESHOLD)
+        end = int(midpoint + LANE_THRESHOLD) #
+        print('start:{},midpoint:{},end:{}'.format(start,midpoint,end))
+        leftx_base = np.argmax(histogram[start : midpoint]) + start
+        rightx_base = np.argmax(histogram[midpoint:end]) + midpoint
+        leftx_current = leftx_base
+        rightx_current = rightx_base
+        print('leftx_base:{},rightx_base:{}'.format(leftx_base,rightx_base))   
+
+        return leftx_current,rightx_current
+    else:
+        return pre_search_left_x,pre_search_right_x
+
 def fit_line(binary_bev_img,visualization=True):
     print('fit_line***********************')
-    cv2.imwrite('search_on_this_binary_bev_img.png',binary_bev_img)
+    warp_imwrite('search_on_this_binary_bev_img.png',binary_bev_img)
     #确定滑窗开始的起始位置
     h,w = binary_bev_img.shape
-    histogram = np.sum(binary_bev_img[int(h/2):,:], axis=0) #图像下半部分每一列的非0像素个数
+    histogram = np.sum(binary_bev_img[FIT_LINE_H_START:,:], axis=0) #图像下半部分每一列的非0像素个数  adjust this to avoid rotation
     #print('histogram:{}'.format(histogram.shape))
     midpoint = np.int32(histogram.shape[0]/2)#宽度的一半
     
     start = int(midpoint - LANE_THRESHOLD)
-    end = int(midpoint + LANE_THRESHOLD)
+    end = int(midpoint + LANE_THRESHOLD) #
     print('start:{},midpoint:{},end:{}'.format(start,midpoint,end))
     leftx_base = np.argmax(histogram[start : midpoint]) + start
     rightx_base = np.argmax(histogram[midpoint:end]) + midpoint
@@ -133,6 +172,8 @@ def fit_line(binary_bev_img,visualization=True):
     rightx_current = rightx_base
     print('leftx_base:{},rightx_base:{}'.format(leftx_base,rightx_base))
     
+    # leftx_current,rightx_current = get_search_base(binary_bev_img)
+
     #确定所有车道线点的下标
     lane_pixel = binary_bev_img.nonzero()
     lane_pixel_y = np.array(lane_pixel[0])
@@ -145,6 +186,7 @@ def fit_line(binary_bev_img,visualization=True):
     #设定滑窗的大小
     nwindows = 9
     window_size_x,window_size_y = WINDOW_SIZE_X,int(binary_bev_img.shape[0]/nwindows)
+    print('x方向滑动大小:{},y方向滑动大小:{}'.format(window_size_x,window_size_y))
     all_windows=[]
     for window in range(nwindows):
         #确定当前滑窗范围　
@@ -160,7 +202,7 @@ def fit_line(binary_bev_img,visualization=True):
         left_window = ((win_xleft_low,win_y_low),(win_xleft_high,win_y_high))
         right_window = ((win_xright_low,win_y_low),(win_xright_high,win_y_high))
         all_windows.append((left_window,right_window))
-        # print('left_window:{},right_window:{}'.format(left_window,right_window))
+        print('left_window:{},right_window:{}'.format(left_window,right_window))
 
         #确定滑窗内的车道线点
         good_left_inds = ((lane_pixel_y >= win_y_low) & (lane_pixel_y < win_y_high) & (lane_pixel_x >= win_xleft_low) & (lane_pixel_x < win_xleft_high)).nonzero()[0]
@@ -190,7 +232,7 @@ def fit_line(binary_bev_img,visualization=True):
         right_color = (197,145,99)
         search_img = cv2.rectangle(search_img, left_window[0], left_window[1], left_color, thickness)
         search_img = cv2.rectangle(search_img, right_window[0], right_window[1], right_color, thickness)
-    cv2.imwrite('prediction_binary_search_windows.png',search_img)
+    warp_imwrite('prediction_binary_search_windows.png',search_img)
     print('draw prediction_binary_search_windows end')
 
     #提取左右车道线点的像素坐标
@@ -233,7 +275,7 @@ def fit_line(binary_bev_img,visualization=True):
             out_img[ploty,draw_left_fitx] = [255,0,0]
             out_img[ploty,draw_right_fitx] = [255,0,0]
 
-        cv2.imwrite('prediction_linefit_onbev.png',out_img)
+        warp_imwrite('prediction_linefit_onbev.png',out_img)
     print('draw line on bev end')
 
     return left_fit,right_fit,leftx,rightx,out_img
@@ -246,8 +288,11 @@ def cal_curvature(fit):
     d = np.polyder(fit) #导数
 
     curvature = np.polyval(d, Y_FOR_CAL_CURVATURE)
-
-    return curvature
+    
+    if CURVE_THETA:
+        return [math.degrees(math.atan(e)) for e in curvature]
+    else:
+        return curvature
     
 def cal_distance(self_car_pixel,M,left_fit,right_fit):
     car_vec = np.array([self_car_pixel[0],self_car_pixel[1],1])
@@ -266,6 +311,16 @@ def cal_distance(self_car_pixel,M,left_fit,right_fit):
 
     return left_distance,right_distance
 
+def ajust_distance(left_distance,right_distance,alpha):
+    """
+    将相机中心距离左右车道的距离转换成车辆左右边沿距离车道线的距离
+    由于车身在车道内并非完全平行于车道线,bev图的底边中点实际上是摄像头在地面垂线点沿着摄像头方向4m左右的地面点
+    """
+    left_distance = left_distance - 4.0 * math.sin(alpha) - CAM_CENTER_TO_LEFT 
+    right_distance = right_distance + 4.0 * math.sin(alpha) - CAM_CENTER_TO_RIGHT 
+
+    return left_distance,right_distance
+
 def post_process_on_bev(prediction_binary_img,origin_img,M,M_inv):    
     fit_on_front_img = origin_img
     fit_success = False 
@@ -274,7 +329,7 @@ def post_process_on_bev(prediction_binary_img,origin_img,M,M_inv):
     print('post_process_on_bev*********************************')
     #这里prediction_binary_img是交给前处理之前的图片.
     print('prediction_binary_img:{}'.format(prediction_binary_img.shape))
-    cv2.imwrite('prediction_binary_on_origin.png',prediction_binary_img) #在原图尺寸上的分割图
+    warp_imwrite('prediction_binary_on_origin.png',prediction_binary_img) #在原图尺寸上的分割图
     
     # print('M is :{}'.format(M))
     t0 = time.time()
@@ -283,7 +338,7 @@ def post_process_on_bev(prediction_binary_img,origin_img,M,M_inv):
     if PRINT_TIME_STATIC:
             print('from front img to bev img time: {} ms!'.format(t))
     
-    cv2.imwrite('prediction_binary_on_bev.png',binary_bev_img)
+    warp_imwrite('prediction_binary_on_bev.png',binary_bev_img)
     try:
         t0 = time.time()
         left_fit,right_fit,leftx,rightx,out_img = fit_line(binary_bev_img)
@@ -293,36 +348,39 @@ def post_process_on_bev(prediction_binary_img,origin_img,M,M_inv):
         
         print('draw line on bev end********')
 
-        #计算距离左右车道线的距离
-        left_distance,right_distance = cal_distance(CAR_PIXEL_ON_FRONT,M,left_fit,right_fit)
-        print('left_distance:{},right_distance:{}'.format(left_distance,right_distance))
+        # #计算距离左右车道线的距离
+        # left_distance,right_distance = cal_distance(CAR_PIXEL_ON_FRONT,M,left_fit,right_fit)
+        # print('left_distance:{},right_distance:{}'.format(left_distance,right_distance))
 
-        #计算曲率. 使用左车道线拟合曲线
-        curvatures = cal_curvature(left_fit)
-        print('curvatures:{}'.format(curvatures))
+        # #计算曲率. 使用左车道线拟合曲线
+        # curvatures = cal_curvature(left_fit)
+        # print('curvatures:{}'.format(curvatures))
 
 
-        ##绘制了车道线曲线的透视图变换到原图视角
-        t0 = time.time()
-        if NEED_VISUALIZATION:
-            line_img = warper(out_img, M_inv)
-            # line_img = cv2.warpPerspective(out_img, M_inv, (out_img.shape[1], out_img.shape[0]), flags=cv2.INTER_NEAREST) 
-            print('convert from bev to front')
-            # fit_on_front_img = cv2.addWeighted(origin_img, 1, prediction_binary_img, 2, 0)
-            fit_on_front_img = cv2.addWeighted(origin_img, 1, line_img, 2, 0)
-            description = 'left:{:.2f},right:{:.2f}'.format(left_distance,right_distance)
-            cv2.putText(fit_on_front_img, description, (20, 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-            # cv2.imwrite('prediction_linefit_on_origin_img.png',fit_on_front_img)
-        t = (time.time() - t0)*1000
-        if PRINT_TIME_STATIC:
-            print('VISUALIZATION time: {} ms!'.format(t))
+        # ##绘制了车道线曲线的透视图变换到原图视角
+        # t0 = time.time()
+        # if NEED_VISUALIZATION:
+        #     line_img = warper(out_img, M_inv)
+        #     # line_img = cv2.warpPerspective(out_img, M_inv, (out_img.shape[1], out_img.shape[0]), flags=cv2.INTER_NEAREST) 
+        #     print('convert from bev to front')
+        #     # fit_on_front_img = cv2.addWeighted(origin_img, 1, prediction_binary_img, 2, 0)
+        #     fit_on_front_img = cv2.addWeighted(origin_img, 1, line_img, 2, 0)
+        #     description = 'left:{:.2f},right:{:.2f}'.format(left_distance,right_distance)
+        #     cv2.putText(fit_on_front_img, description, (20, 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        #     warp_imwrite('prediction_linefit_on_origin_img.png',fit_on_front_img)
+        # t = (time.time() - t0)*1000
+        # if PRINT_TIME_STATIC:
+        #     print('VISUALIZATION time: {} ms!'.format(t))
         
         fit_success = True
     except:
         print('eeeeeeeeeeeeeeeeeeeee')
     
-    return fit_success,left_distance,right_distance,curvatures,fit_on_front_img
-
+    # return fit_success,left_distance,right_distance,curvatures,fit_on_front_img
+    if fit_success:
+        return fit_success,left_fit,right_fit,leftx,rightx,out_img
+    else:
+        return fit_success,None,None,None,None,None
 
 def get_file(dirname,filelist=[],sortKey=None):
     for dirpath, dirname, filenames in os.walk(dirname):
@@ -333,7 +391,6 @@ def get_file(dirname,filelist=[],sortKey=None):
                 fullpath = os.path.join(dirpath, filename)
                 filelist.append(fullpath)
 
-
 def sort_by_time(file_name):
     """
     文件名是数字｀
@@ -343,44 +400,11 @@ def sort_by_time(file_name):
    
     return (int(nums[0]),int(nums[1]))
     
+def test_fit_line():
+    test_png = '/home/sc/work/dlDev/mivii_orin/lane_detect_ros_python/images/20230509/prediction_binary_on_origin.png'
+    binary_bev_img = warper(cv2.imread(test_png,cv2.IMREAD_GRAYSCALE), H)
+    # binary_bev_img = cv2.imread(test_png,cv2.IMREAD_GRAYSCALE)  
+    fit_line(binary_bev_img,visualization=True)
 
-import onnx
-import torch
-def export_onnx(pt_path,onnx_save_path):
-    # change onnx input/output types
-    # import onnx
-    # onnx_model = onnx.load(ONNX_FILE_PATH)
-    # graph = onnx_model.graph
-    # in_type = getattr(graph.input[0], "type", None)
-    # getattr(in_type, "tensor_type", None).elem_type = 10  # fp16
-    # out_type = getattr(graph.output[0], "type", None)
-    # getattr(out_type, "tensor_type", None).elem_type = 10  # fp16
-    # onnx.save(onnx_model, ONNX_FILE_PATH)
-
-    weigths = torch.load(pt_path) #model input:1280
-   
-    output_names = ['output']
-    
-    # 加载模型 不清楚原因,只能在cpu上处理 torch版本:1.13.1+cu117
-    # device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    device = "cpu"
-    model = weigths['model'].float() #模型转换为fp32
-    model = model.to(device)
-    _ = model.eval()
- 
-    # Input
-    img = torch.zeros(1, 3, 960,960) # image size(1,3,320,192) iDetection
-    # img = img.half().to(device)
-    img = img.to(device)
-    print('img shape:{},is_cuda:{}'.format(img.shape,img.is_cuda))
-
-    print('prepare to export*******')
-    torch.onnx.export(model, img, onnx_save_path, verbose=False, opset_version=11, input_names=['images'],
-                          output_names=output_names)
-    print('export done*******')
-
-    # Checks
-    onnx_model = onnx.load(onnx_save_path)  # load onnx model
-    onnx.checker.check_model(onnx_model)  # check onnx model
-
-    print(onnx.helper.printable_graph(onnx_model.graph))  # print a human readable model
+if __name__ == '__main__':
+    test_fit_line()

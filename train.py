@@ -38,6 +38,11 @@ from utils.loss import ComputeLoss, ComputeLossOTA
 from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
 from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
+from utils.banqiao_dataset import COLOR_MAP,cls_names
+
+import test_banqiao
+from utils.plots_banqiao import plot_images
+from utils.metrics_banqiao import fitness
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +52,22 @@ Ll_Seg_Head_para_idx = [str(i) for i in range(102,110)]
 
 train_lane_seg_only=True
 
+def test_dataset_read(hyp, opt, device, test_path, imgsz, batch_size, gs,rank):
+    print('test_path:',test_path)
+    testloader,_ = create_dataloader(test_path, imgsz, 1, gs, opt,
+                                hyp=hyp, augment=False, cache=opt.cache_images, rect=opt.rect, rank=rank,
+                                world_size=opt.world_size, workers=1,
+                                image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('test: '),isLane=True,isTest=True)
+
+    for batch_i, (img, multi_targets, paths, shapes) in enumerate(tqdm(testloader, desc='----')):
+        print(paths)
+
 def train(hyp, opt, device, tb_writer=None):
     logger.info(colorstr('hyperparameters: ') + ', '.join(f'{k}={v}' for k, v in hyp.items()))
     save_dir, epochs, batch_size, total_batch_size, weights, rank, freeze = \
         Path(opt.save_dir), opt.epochs, opt.batch_size, opt.total_batch_size, opt.weights, opt.global_rank, opt.freeze
+
+    print('epochs:{}-------------------------'.format(epochs))
 
     # Directories
     wdir = save_dir / 'weights'
@@ -58,6 +75,9 @@ def train(hyp, opt, device, tb_writer=None):
     last = wdir / 'last.pt'
     best = wdir / 'best.pt'
     results_file = save_dir / 'results.txt'
+    with open(results_file, 'a') as f:
+        s =  ('%10s' * 10) % ('dice', 'p1', 'r1', 'dice1','p2', 'r2', 'dice2','p3', 'r3', 'dice3')
+        f.write(s+'\n')  
 
     # Save run settings
     with open(save_dir / 'hyp.yaml', 'w') as f:
@@ -92,8 +112,8 @@ def train(hyp, opt, device, tb_writer=None):
     # Model
     pretrained = weights.endswith('.pt')
     if pretrained:
-        with torch_distributed_zero_first(rank):
-            attempt_download(weights)  # download if not found locally
+        # with torch_distributed_zero_first(rank):
+        #     attempt_download(weights)  # download if not found locally
         ckpt = torch.load(weights, map_location=device)  # load checkpoint
         model = Model(opt.cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
         # print('model is {}'.format(model))
@@ -109,7 +129,8 @@ def train(hyp, opt, device, tb_writer=None):
     with torch_distributed_zero_first(rank):
         check_dataset(data_dict)  # check
     train_path = data_dict['train']
-    test_path = data_dict['val']
+    valid_path = data_dict['val']
+    test_path = data_dict['test']
 
     # Freeze
     freeze = [f'model.{x}.' for x in (freeze if len(freeze) > 1 else range(freeze[0]))]  # parameter names to freeze (full or partial)
@@ -255,6 +276,7 @@ def train(hyp, opt, device, tb_writer=None):
     gs = max(int(model.stride.max()), 32)  # grid size (max stride)
     nl = model.model[-1].nl  # number of detection layers (used for scaling hyp['obj'])
     imgsz, imgsz_test = [check_img_size(x, gs) for x in opt.img_size]  # verify imgsz are gs-multiples
+    # imgsz = (960,540)
 
     # DP mode
     if cuda and rank == -1 and torch.cuda.device_count() > 1:
@@ -265,9 +287,13 @@ def train(hyp, opt, device, tb_writer=None):
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
         logger.info('Using SyncBatchNorm()')
 
+    # #
+    # test_dataset_read(hyp, opt, device, test_path, imgsz, batch_size, gs,rank)
+    # return
+
     # Trainloader
     dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
-                                            hyp=hyp, augment=False, cache=opt.cache_images, rect=opt.rect, rank=rank,
+                                            hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
                                             world_size=opt.world_size, workers=opt.workers,
                                             image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '),isLane=True)
     # mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
@@ -276,10 +302,11 @@ def train(hyp, opt, device, tb_writer=None):
 
     # Process 0
     if rank in [-1, 0]:
-        testloader = create_dataloader(test_path, imgsz_test, batch_size * 2, gs, opt,  # testloader
-                                       hyp=hyp, cache=opt.cache_images and not opt.notest, rect=True, rank=-1,
-                                       world_size=opt.world_size, workers=opt.workers,
-                                       pad=0.5, prefix=colorstr('val: '))[0]
+        validloader,_ = create_dataloader(valid_path, imgsz, batch_size, gs, opt,
+                                        hyp=hyp, augment=False, cache=opt.cache_images, rect=opt.rect, rank=rank,
+                                        world_size=opt.world_size, workers=opt.workers,
+                                        image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('val: '),isLane=True)
+
 
         if not opt.resume:
             labels = np.concatenate(dataset.labels, 0)
@@ -354,7 +381,9 @@ def train(hyp, opt, device, tb_writer=None):
         if rank != -1:
             dataloader.sampler.set_epoch(epoch)
         pbar = enumerate(dataloader)
-        logger.info(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'labels', 'img_size'))
+        # logger.info(('\n' + '%10s' * 8) % ('Epoch', 'lane', 'lane_point', 'unlane_point', 'cls', 'total', 'labels', 'img_size'))
+        # logger.info(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'labels', 'img_size'))
+        logger.info(('\n' + '%10s' * 6) % ('Epoch', 'lane', 'pos', 'neg', 'dice@0.7', 'img_size'))
         if rank in [-1, 0]:
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
@@ -391,20 +420,22 @@ def train(hyp, opt, device, tb_writer=None):
                     loss, loss_items = compute_loss_ota(pred, targets.to(device), imgs)  # loss scaled by batch_size
                 else:
                     multi_targets = [e.to(device) for e in multi_targets]
-                    # pos_weight = exponential_decay(epoch,200,100,1) #从200衰减到1,共计100epoch
+                    # begin_pos_weight, = 
+                    begin_pos_weight,epochs_number,end_pos_weight  = hyp['exponential_decay'].split(',')
+                    begin_pos_weight,epochs_number,end_pos_weight = int(begin_pos_weight),int(epochs_number),int(end_pos_weight)
                     # 板桥数据recall不行,加大pos样本权重
-                    pos_weight = exponential_decay(epoch,2000,100,100) #从200衰减到1,共计100epoch                    
+                    pos_weight = exponential_decay(epoch,begin_pos_weight,epochs_number,end_pos_weight)            
                     if pos_weight > 1:
                         compute_loss.update_pos_weight(pos_weight)
                     # print(multi_targets)
-                    loss, loss_items,lane_items = compute_loss(pred, multi_targets,withLaneLoss=True)  # loss scaled by batch_size
-                    print('lane_items:{}'.format(lane_items))
+                    loss, loss_items,lane_details = compute_loss(pred, multi_targets,withLaneLoss=True)  # loss scaled by batch_size
+                    # print('lane_items:{}'.format(lane_items))
 
                     #隔一段时间绘制一次预测结果图
-                    if epoch%10 == 0:
+                    if epoch%30 == 0 or ni < 10:
                         _,lane_pre = pred[0],pred[1] #lane 2x640x640
                         _,lane_gt = multi_targets[0],multi_targets[1]
-                        save_prediction_img(imgs,lane_pre,lane_gt,epoch,i)
+                        save_prediction_img(imgs,paths,lane_pre,lane_gt,epoch,i)
 
                 if rank != -1:
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
@@ -422,24 +453,14 @@ def train(hyp, opt, device, tb_writer=None):
                 if ema:
                     ema.update(model)
 
-            # Print
             if rank in [-1, 0]:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
                 mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
-                s = ('%10s' * 2 + '%10.4g' * 6) % (
-                    '%g/%g' % (epoch, epochs - 1), mem, *mloss, targets.shape[0], imgs.shape[-1])
+                # lane_item = '%.3g' % (lane_item)
+                
+                s = ('%10s'  + '%10.4g' * 5) % (
+                    '%g/%g' % (epoch, epochs - 1), lane_details[0],lane_details[1],lane_details[2],lane_details[3],imgs.shape[-1])
                 pbar.set_description(s)
-
-                # Plot
-                if plots and ni < 10:
-                    f = save_dir / f'train_batch{ni}.jpg'  # filename
-                    Thread(target=plot_images, args=(imgs, targets, paths, f), daemon=True).start()
-                    # if tb_writer:
-                    #     tb_writer.add_image(f, result, dataformats='HWC', global_step=epoch)
-                    #     tb_writer.add_graph(torch.jit.trace(model, imgs, strict=False), [])  # add model graph
-                elif plots and ni == 10 and wandb_logger.wandb:
-                    wandb_logger.log({"Mosaics": [wandb_logger.wandb.Image(str(x), caption=x.name) for x in
-                                                  save_dir.glob('train*.jpg') if x.exists()]})
 
             # end batch ------------------------------------------------------------------------------------------------
         # end epoch ----------------------------------------------------------------------------------------------------
@@ -455,45 +476,29 @@ def train(hyp, opt, device, tb_writer=None):
             final_epoch = epoch + 1 == epochs
             if not opt.notest or final_epoch:  # Calculate mAP
                 wandb_logger.current_epoch = epoch + 1
-                # results, maps, times = test.test(data_dict,
-                #                                  batch_size=batch_size * 2,
-                #                                  imgsz=imgsz_test,
-                #                                  model=ema.ema,
-                #                                  single_cls=opt.single_cls,
-                #                                  dataloader=testloader,
-                #                                  save_dir=save_dir,
-                #                                  verbose=nc < 50 and final_epoch,
-                #                                  plots=plots and final_epoch,
-                #                                  wandb_logger=wandb_logger,
-                #                                  compute_loss=compute_loss,
-                #                                  is_coco=is_coco,
-                #                                  v5_metric=opt.v5_metric)
+                dice,cls_metrics = test_banqiao.test(data_dict,
+                                                 batch_size=batch_size * 2,
+                                                 imgsz=imgsz_test,
+                                                 model=ema.ema,
+                                                 single_cls=opt.single_cls,
+                                                 dataloader=validloader,
+                                                 save_dir=save_dir,
+                                                 verbose=nc < 50 and final_epoch,
+                                                 plots=True,
+                                                 wandb_logger=wandb_logger,
+                                                 compute_loss=compute_loss)
 
             # Write
             with open(results_file, 'a') as f:
-                line_static_s = ''
-                for e in lane_items:
-                    e = '%.3f' % e
-                    print(e)
-                    line_static_s += ('{} '.format(e))
-                s = line_static_s + s
-                f.write(s + '%10.4g' * 7 % results + '\n')  # append metrics, val_loss
+                s = '%10.4g ' % (dice)
+                for m in cls_metrics:
+                    s = s +  ('%10.4g' * 3 ) % (m[0],m[1],m[2])
+                f.write(s+'\n')  
             if len(opt.name) and opt.bucket:
                 os.system('gsutil cp %s gs://%s/results/results%s.txt' % (results_file, opt.bucket, opt.name))
 
-            # Log
-            tags = ['train/box_loss', 'train/obj_loss', 'train/cls_loss',  # train loss
-                    'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95',
-                    'val/box_loss', 'val/obj_loss', 'val/cls_loss',  # val loss
-                    'x/lr0', 'x/lr1', 'x/lr2']  # params
-            for x, tag in zip(list(mloss[:-1]) + list(results) + lr, tags):
-                if tb_writer:
-                    tb_writer.add_scalar(tag, x, epoch)  # tensorboard
-                if wandb_logger.wandb:
-                    wandb_logger.log({tag: x})  # W&B
-
             # Update best mAP
-            fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95]
+            fi = fitness(dice)  #
             if fi > best_fitness:
                 best_fitness = fi
             wandb_logger.end_epoch(best_result=best_fitness == fi)
@@ -502,7 +507,7 @@ def train(hyp, opt, device, tb_writer=None):
             if (not opt.nosave) or (final_epoch and not opt.evolve):  # if save
                 ckpt = {'epoch': epoch,
                         'best_fitness': best_fitness,
-                        'training_results': results_file.read_text(),
+                        # 'training_results': results_file.read_text(),
                         'model': deepcopy(model.module if is_parallel(model) else model).half(),
                         'ema': deepcopy(ema.ema).half(),
                         'updates': ema.updates,
@@ -511,17 +516,17 @@ def train(hyp, opt, device, tb_writer=None):
 
                 # Save last, best and delete
                 torch.save(ckpt, last)
-                print('save {}'.format(last))
-                if best_fitness == fi:
+                # print('save {}'.format(last))
+                if (best_fitness == fi):
                     torch.save(ckpt, best)
-                if (best_fitness == fi) and (epoch >= 200):
-                    torch.save(ckpt, wdir / 'best_{:03d}.pt'.format(epoch))
+                # if (best_fitness == fi) and (epoch >= 200):
+                #     torch.save(ckpt, wdir / 'best_{:03d}.pt'.format(epoch))
                 if epoch == 0:
-                    torch.save(ckpt, wdir / 'epoch_{:03d}.pt'.format(epoch))
+                    torch.save(ckpt, wdir / 'epoch_{:03d}_{:.2f}.pt'.format(epoch,dice))
                 elif ((epoch+1) % 10) == 0:
-                    torch.save(ckpt, wdir / 'epoch_{:03d}.pt'.format(epoch))
+                    torch.save(ckpt, wdir / 'epoch_{:03d}_{:.2f}.pt'.format(epoch,dice))
                 elif epoch >= (epochs-5):
-                    torch.save(ckpt, wdir / 'epoch_{:03d}.pt'.format(epoch))
+                    torch.save(ckpt, wdir / 'epoch_{:03d}_{:.2f}.pt'.format(epoch,dice))
                 if wandb_logger.wandb:
                     if ((epoch + 1) % opt.save_period == 0 and not final_epoch) and opt.save_period != -1:
                         wandb_logger.log_model(
@@ -532,6 +537,7 @@ def train(hyp, opt, device, tb_writer=None):
     # end training
     
     print('training end***************')
+    logger.info('%g epochs completed in %.3f hours.\n' % (epochs - start_epoch + 1, (time.time() - t0) / 3600))
 
     if rank in [-1, 0]:
         # Plots
@@ -542,22 +548,27 @@ def train(hyp, opt, device, tb_writer=None):
                 wandb_logger.log({"Results": [wandb_logger.wandb.Image(str(save_dir / f), caption=f) for f in files
                                               if (save_dir / f).exists()]})
         # Test best.pt
-        logger.info('%g epochs completed in %.3f hours.\n' % (epoch - start_epoch + 1, (time.time() - t0) / 3600))
-        if opt.data.endswith('coco.yaml') and nc == 80:  # if COCO
-            for m in (last, best) if best.exists() else (last):  # speed, mAP tests
-                results, _, _ = test.test(opt.data,
-                                          batch_size=batch_size * 2,
-                                          imgsz=imgsz_test,
-                                          conf_thres=0.001,
-                                          iou_thres=0.7,
-                                          model=attempt_load(m, device).half(),
-                                          single_cls=opt.single_cls,
-                                          dataloader=testloader,
-                                          save_dir=save_dir,
-                                          save_json=True,
-                                          plots=False,
-                                          is_coco=is_coco,
-                                          v5_metric=opt.v5_metric)
+        # logger.info('%g epochs completed in %.3f hours.\n' % (epoch - start_epoch + 1, (time.time() - t0) / 3600))
+        #test on test dataset
+        testloader,_ = create_dataloader(test_path, imgsz, batch_size*2, gs, opt,
+                                hyp=hyp, augment=False, cache=opt.cache_images, rect=opt.rect, rank=rank,
+                                world_size=opt.world_size, workers=opt.workers,
+                                image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('test: '),isLane=True,isTest=True)
+        for m in (last, best) if best.exists() else (last):  # speed, mAP tests
+            print('test on test dataset---------------,model:{}'.format(m))
+            dice = test_banqiao.test(opt.data,
+                                        batch_size=batch_size * 2,
+                                        imgsz=imgsz_test,
+                                        conf_thres=0.001,
+                                        iou_thres=0.7,
+                                        model=attempt_load(m, device).half(),
+                                        single_cls=opt.single_cls,
+                                        dataloader=testloader,
+                                        save_dir=save_dir,
+                                        save_json=True,
+                                        plots=True,
+                                        is_test_dataset=True)
+            
 
         # Strip optimizers
         final = best if best.exists() else last  # final model
@@ -574,11 +585,11 @@ def train(hyp, opt, device, tb_writer=None):
     else:
         dist.destroy_process_group()
     torch.cuda.empty_cache()
-    return results
+    return dice
 
 
-def save_prediction_img(imgs,lane_pre,lane_gt,epoch,batch):
-    save_dir='train_results/{}/{}'.format(epoch,batch)
+def save_prediction_img(imgs,paths,lane_pre,lane_gt,epoch,batch):
+    save_dir='train_results/epoch{}/batch{}'.format(epoch,batch)
     isExist = os.path.exists(save_dir)
     if not isExist:
         # Create a new directory because it does not exist
@@ -592,21 +603,25 @@ def save_prediction_img(imgs,lane_pre,lane_gt,epoch,batch):
     gt_images = result_images.copy()
     # lane = lane.float().cpu() #bchw
 
-    b,_,_,_ = lane_gt.shape
+    b,cls_num,_,_ = lane_gt.shape
+    # print('lane_gt:{}---------------------------------------------------'.format(lane_gt.shape))
     for i in range(b):  
+        img_path = paths[i].split('/')[-1]
         current_gt_lane = lane_gt[i]
-        gt_lane_mask = np.where(current_gt_lane==1)
-
-        current_lane_pre = torch.sigmoid(lane_pre[i,...])
-        current_lane_pre_mask = np.where(current_lane_pre>0.7)
-        pre_lane_num = len(current_lane_pre_mask[1])
-        # print('当前检测出车道点个数:{}'.format(pre_lane_num))
         
+        current_lane_pre = torch.sigmoid(lane_pre[i,...])
         result_image = result_images[i] * 255 #float32 to uint8
-        result_image = result_image[...,::-1] # rgb to bgr      
-        result_image[current_lane_pre_mask[1],current_lane_pre_mask[2],0] = 0
-        result_image[current_lane_pre_mask[1],current_lane_pre_mask[2],1] = 0
-        result_image[current_lane_pre_mask[1],current_lane_pre_mask[2],2] = 255 
+        result_image = result_image[...,::-1] # rgb to bgr    
+        for j in range(cls_num):
+            current_lane_pre_mask = np.where(current_lane_pre[j,...]>0.7)
+            pre_lane_num = len(current_lane_pre_mask[1])
+            # print('当前检测出车道点个数:{}'.format(pre_lane_num))
+
+            color = COLOR_MAP[cls_names[j]]
+
+            result_image[current_lane_pre_mask[0],current_lane_pre_mask[1],0] = color[0]
+            result_image[current_lane_pre_mask[0],current_lane_pre_mask[1],1] = color[1]
+            result_image[current_lane_pre_mask[0],current_lane_pre_mask[1],2] = color[2]
 
         save_img_name=None
         save_img_name = '{}/{}_pre.jpg'.format(save_dir,i)
@@ -614,12 +629,20 @@ def save_prediction_img(imgs,lane_pre,lane_gt,epoch,batch):
         cv2.imwrite(save_img_name,result_image)
 
         gt_image = gt_images[i] * 255
-        gt_image = gt_image[...,::-1] # rgb to bgr      
-        gt_image[gt_lane_mask[1],gt_lane_mask[2],0] = 0
-        gt_image[gt_lane_mask[1],gt_lane_mask[2],1] = 0
-        gt_image[gt_lane_mask[1],gt_lane_mask[2],2] = 255 
+        gt_image = gt_image[...,::-1] # rgb to bgr    
+        for j in range(cls_num):
+            color = COLOR_MAP[cls_names[j]]
+            
+            gt_lane_mask = np.where(current_gt_lane[j,...]==1)
+
+            gt_image[gt_lane_mask[0],gt_lane_mask[1],0] = color[0]
+            gt_image[gt_lane_mask[0],gt_lane_mask[1],1] = color[1]
+            gt_image[gt_lane_mask[0],gt_lane_mask[1],2] = color[2]
+
         save_img_name = '{}/{}_gt.jpg'.format(save_dir,i)
         # print('save_img_name:{}'.format(save_img_name))
+        gt_image = gt_image.astype(np.uint8).copy() 
+        cv2.putText(gt_image, img_path, (20, 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
         cv2.imwrite(save_img_name,gt_image)
 
 import numpy as np
@@ -629,23 +652,25 @@ def exponential_decay(t, init=0.8, m=30, finish=0.2):
     decay = np.exp(-alpha * (t + l))
     return decay
 
-
+ 
 if __name__ == '__main__':
     """
     本机conda环境:SMOKE
     训练机环境:orin_work
     python train.py --workers 8 --device 0 --batch-size 1 --data data/coco.yaml --img 640 640 --cfg cfg/training/yolov7.yaml --weights '' --name yolov7 --hyp data/hyp.scratch.p5.yaml --notest --evolve
-    python train.py --data data/banqiao.yaml --img 960  --cfg cfg/multihead.yaml --hyp data/hyp.lane_banqiao.yaml 
+    python train.py --data data/banqiao.yaml --img 960  --batch-size 8 --cfg cfg/multihead.yaml --hyp data/hyp.lane_banqiao.yaml --name banqiao --weights runs/train/banqiao5/weights/epoch_099.pt
+    python train.py --data data/banqiao_old2mNew8m.yaml --img 960 540 --batch-size 8 --cfg cfg/multihead.yaml --hyp data/hyp.lane_banqiao.yaml --name banqiao_mix2m8m --weights ./runs/train/banqiao19/weights/epoch_199.pt   
+    python train.py --data data/banqiao_cam8M.yaml --img 960 --batch-size 8 --cfg cfg/multihead.yaml --hyp data/hyp.lane_banqiao.yaml --name banqiao_cam8M --weights ./runs/train/banqiao19/weights/epoch_199.pt   
     """
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', type=str, default='yolov7.pt', help='initial weights path')
-    parser.add_argument('--cfg', type=str, default='', help='model.yaml path')
-    parser.add_argument('--data', type=str, default='data/coco.yaml', help='data.yaml path')
-    parser.add_argument('--hyp', type=str, default='data/hyp.scratch.p5.yaml', help='hyperparameters path')
+    parser.add_argument('--cfg', type=str, default='cfg/multihead_multicls.yaml', help='model.yaml path')
+    parser.add_argument('--data', type=str, default='data/banqiao_lane_seg.yaml', help='data.yaml path')
+    parser.add_argument('--hyp', type=str, default='data/hyp.lane_banqiao.yaml', help='hyperparameters path')
     parser.add_argument('--epochs', type=int, default=300)
-    parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs')
-    parser.add_argument('--img-size', nargs='+', type=int, default=[640, 640], help='[train, test] image sizes')
-    parser.add_argument('--rect', action='store_true', help='rectangular training')
+    parser.add_argument('--batch-size', type=int, default=24, help='total batch size for all GPUs')
+    parser.add_argument('--img-size', nargs='+', type=int, default=[1280, 1280], help='[train, test] image sizes')
+    parser.add_argument('--rect', action='store_false', help='rectangular training')
     parser.add_argument('--resume', nargs='?', const=True, default=False, help='resume most recent training')
     parser.add_argument('--nosave', action='store_true', help='only save final checkpoint')
     parser.add_argument('--notest', action='store_true', help='only test final epoch')
@@ -654,7 +679,7 @@ if __name__ == '__main__':
     parser.add_argument('--bucket', type=str, default='', help='gsutil bucket')
     parser.add_argument('--cache-images', action='store_true', help='cache images for faster training')
     parser.add_argument('--image-weights', action='store_true', help='use weighted image selection for training')
-    parser.add_argument('--device', default='0', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--device', default='3', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--multi-scale', action='store_true', help='vary img-size +/- 50%%')
     parser.add_argument('--single-cls', action='store_true', help='train multi-class data as single-class')
     parser.add_argument('--adam', action='store_true', help='use torch.optim.Adam() optimizer')
@@ -663,7 +688,7 @@ if __name__ == '__main__':
     parser.add_argument('--workers', type=int, default=8, help='maximum number of dataloader workers')
     parser.add_argument('--project', default='runs/train', help='save to project/name')
     parser.add_argument('--entity', default=None, help='W&B entity')
-    parser.add_argument('--name', default='exp', help='save to project/name')
+    parser.add_argument('--name', default='road0203_hascarintrain_recttrain', help='save to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--quad', action='store_true', help='quad dataloader')
     parser.add_argument('--linear-lr', action='store_true', help='linear LR')
@@ -675,6 +700,7 @@ if __name__ == '__main__':
     parser.add_argument('--freeze', nargs='+', type=int, default=[0], help='Freeze layers: backbone of yolov7=50, first3=0 1 2')
     parser.add_argument('--v5-metric', action='store_true', help='assume maximum recall as 1.0 in AP calculation')
     opt = parser.parse_args()
+    print(opt)
 
     # Set DDP variables
     opt.world_size = int(os.environ['WORLD_SIZE']) if 'WORLD_SIZE' in os.environ else 1
@@ -702,6 +728,8 @@ if __name__ == '__main__':
         opt.name = 'evolve' if opt.evolve else opt.name
         opt.save_dir = increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok | opt.evolve)  # increment run
 
+    print(opt)
+
     # DDP mode
     opt.total_batch_size = opt.batch_size
     device = select_device(opt.device, batch_size=opt.batch_size)
@@ -713,6 +741,7 @@ if __name__ == '__main__':
         assert opt.batch_size % opt.world_size == 0, '--batch-size must be multiple of CUDA device count'
         opt.batch_size = opt.total_batch_size // opt.world_size
 
+    # print(opt)
     # Hyperparameters
     with open(opt.hyp) as f:
         hyp = yaml.load(f, Loader=yaml.SafeLoader)  # load hyps

@@ -245,7 +245,7 @@ def attempt_load(weights, map_location=None):
     model = Ensemble()
     for w in weights if isinstance(weights, list) else [weights]:
         print('w:{}'.format(w))
-        attempt_download(w)
+        # attempt_download(w)
         ckpt = torch.load(w, map_location=map_location)  # load 返回一个dict “model”:nn.ModuleList
         print('type(ckpt) :{}'.format(type(ckpt)))
         # print('ckpt:{}'.format(ckpt))

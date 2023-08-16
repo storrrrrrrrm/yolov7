@@ -6,22 +6,83 @@ from utils.datasets import letterbox
 import os
 import time
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-# weigths = torch.load('./runs/train/yolov7209/weights/epoch_149.pt')
-# weigths = torch.load('./runs/train/yolov7218/weights/epoch_079.pt') #model input:640
-weigths = torch.load('./runs/train/yolov7221/weights/epoch_059.pt') #model input:1280
-model = weigths['model']
-# model = model.half().to(device)
-model = model.to(device)
-_ = model.eval()
+# device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# # weigths = torch.load('./runs/train/yolov7209/weights/epoch_149.pt')
+# # weigths = torch.load('./runs/train/yolov7218/weights/epoch_079.pt') #model input:640
+# weigths = torch.load('./runs/train/yolov7221/weights/epoch_059.pt') #model input:1280
+# weigths = torch.load('./runs/train/banqiao5/weights/epoch_099.pt') #model input:960
+
+# model = weigths['model']
+# # model = model.half().to(device)
+# model = model.to(device)
+# _ = model.eval()
+
+# # 旧的200w相机  
+# # 顺序为lt,lb,rb,rt
+# x = [428, 345, 660,580]
+# y = [330, 390, 390,330]
+# X = [200, 200, 550, 550] #
+# Y = [200, 300, 300, 200]
+# #调整世界坐标系原点的位置使得逆透视变换后车身所在车道大约位于图像中央位置
+# X_offset,Y_offset = 50,100
+# X = [e + X_offset for e in X] #
+# Y = [e + Y_offset for e in Y] 
+    
+
+# apollo数据集,2710x3384图上的选点位置　顺序为lt,lb,rb,rt
+# x = [1502, 1421, 1981, 1877]
+# y = [1917, 2050, 2065, 1935]
+# X = [200, 200, 550, 550] #
+# Y = [200, 850, 850, 200]
+# #调整世界坐标系原点的位置使得逆透视变换后车身所在车道大约位于图像中央位置
+# X_offset,Y_offset = 1200,1200
+# X = [e + X_offset for e in X] #
+# Y = [e + Y_offset for e in Y]
+
+# #8M相机 在3840x2160上的选点
+# # 顺序为lt,lb,rb,rt
+# x = [1358, 985, 2423, 2163]
+# y = [1398, 1752, 1763, 1399]
+# X = [1800, 1800, 2150, 2150] #
+# Y = [1800, 2000, 2000, 1800]
+
+#8M相机　在960x540图片上的选点
+x = [375, 296, 627, 560]
+y = [355, 406, 407, 355]
+X = [200, 200, 350, 350] #
+Y = [200, 250, 250, 200]
+
+X_offset,Y_offset = 350,200
+X = [e + X_offset for e in X] #
+Y = [e + Y_offset for e in Y]
+
+# 
+
+src = np.floor(np.float32([[x[0], y[0]], [x[1], y[1]],[x[2], y[2]], [x[3], y[3]]]))
+dst = np.floor(np.float32([[X[0], Y[0]], [X[1], Y[1]],[X[2], Y[2]], [X[3], Y[3]]]))
+M = cv2.getPerspectiveTransform(src, dst)
+M_inv = cv2.getPerspectiveTransform(dst, src)
+
+
+def load_model(model_path):
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    weigths = torch.load(model_path) 
+
+    model = weigths['model']
+    model = model.to(device)
+    _ = model.eval()
+
+    return model
+
 
 # test_img='/home/autocore/work_sc/datasets/lane_marking_examples/road02/ColorImage/Record001/Camera 6/170927_063811892_Camera_6.jpg'
-def predict(test_img):
+def predict(test_img,model,model_input_size):
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     img = cv2.imread(test_img) #hwc bgr
     result_on_origin_img = img.copy()#在原图上绘制
     result_binary_img = np.zeros( (img.shape[0],img.shape[1]) )
-    img, ratio, (pad_w,pad_h) = letterbox(img,1280,auto=False, scaleup=False) 
-    print('ratio:{},pad_w:{},pad_h:{}'.format(ratio,pad_w,pad_h))
+    img, ratio, (pad_w,pad_h) = letterbox(img,model_input_size,auto=False, scaleup=False) 
+    print('img shape:{},ratio:{},pad_w:{},pad_h:{}'.format(img.shape,ratio,pad_w,pad_h))
     result_img = np.zeros_like(img) #letterbox
     img = img[:, :, ::-1].transpose(2, 0, 1)  # rgb chw
     img = np.ascontiguousarray(img)
@@ -33,12 +94,16 @@ def predict(test_img):
 
     start=time.time()
     output = model(img)
+    
     end=time.time()
     print('forward time:{}'.format(end-start))
     _,lane_pre = output[0],output[1] #lane 2x640x640
-    lane_pre = lane_pre.float().cpu() #bchw
+    print('output len:{},output1 len:{},lane_pre shape:{}'.format(len(output),len(_),lane_pre.shape))
 
-    
+    for e in _:
+        print(len(e))
+
+    lane_pre = lane_pre.float().cpu() #bchw    
     b = lane_pre.shape[0]
     for i in range(b):  
         current_lane_pre = torch.sigmoid(lane_pre[i,...])
@@ -74,21 +139,21 @@ def get_file(dirname,filelist=[],sortKey=None):
                 fullpath = os.path.join(dirpath, filename)
                 filelist.append(fullpath)
 
-def save_video(filelist,videoname):
+def save_video(filelist,videoname,model,model_input_size,M,M_inv):
     result_img_list=[]
     size=None
     for i,img_path in enumerate(filelist):
         start = time.time()
-        result_on_origin_img,result_binary_img = predict(img_path)
+        result_on_origin_img,result_binary_img = predict(img_path,model,model_input_size)
         end = time.time()
         print('predict on {} image:{},time:{:.2f}'.format(i,img_path,end-start))
 
         origin_img = cv2.imread(img_path)
-        result_img = post_process(result_binary_img,origin_img)
+        result_img = post_process(result_binary_img,origin_img,M,M_inv)
         height, width, layers = result_img.shape
         size = (width,height)
         result_img_list.append(result_img)
-        # cv2.imwrite('./prediction_results/prediction{}.png'.format(i),result_img)
+        cv2.imwrite('./prediction_results/prediction{}.png'.format(i),result_img)
         # if i > 10:
         #     break
     try:
@@ -177,6 +242,7 @@ def fit_line(binary_bev_img,visualization=True):
         search_img = cv2.rectangle(search_img, left_window[0], left_window[1], color, thickness)
         search_img = cv2.rectangle(search_img, right_window[0], right_window[1], color, thickness)
     cv2.imwrite('prediction_binary_search_windows.png',search_img)
+    print('draw prediction_binary_search_windows end')
 
     #提取左右车道线点的像素坐标
     left_lane_inds = np.concatenate(left_lane_inds)
@@ -187,9 +253,9 @@ def fit_line(binary_bev_img,visualization=True):
     righty = lane_pixel_y[right_lane_inds]
 
     #做二次多项式拟合
-    print('lefty:{},leftx:{}'.format(lefty,leftx))
+    # print('lefty:{},leftx:{}'.format(lefty,leftx))
     left_fit = np.polyfit(lefty, leftx, 2)
-    print('righty:{},rightx:{}'.format(righty,rightx))
+    # print('righty:{},rightx:{}'.format(righty,rightx))
     right_fit = np.polyfit(righty, rightx, 2)
     
     #绘制曲线
@@ -198,7 +264,8 @@ def fit_line(binary_bev_img,visualization=True):
         out_img = out_img.astype('uint8')
 
         #根据曲线方程算出每一个y对应的x  
-        ploty = np.linspace(0, h-1, h ) 
+        ploty = np.linspace(0, h-10, h-10) 
+        print('h is :{}'.format(h))
         left_fitx = left_fit[0]*ploty**2 + left_fit[1]*ploty + left_fit[2]
         right_fitx = right_fit[0]*ploty**2 + right_fit[1]*ploty + right_fit[2]
 
@@ -208,6 +275,7 @@ def fit_line(binary_bev_img,visualization=True):
 
         #车道线拟合曲线绘制
         ploty = [int(e) for e in ploty ]
+        # print('ploty:{}'.format(ploty))
         left_fitx = [int(e) for e in left_fitx]
         right_fitx = [int(e) for e in right_fitx]
         for i in range(-5,5): #只画一条线的话　太模糊了　看不出来
@@ -216,6 +284,8 @@ def fit_line(binary_bev_img,visualization=True):
             out_img[ploty,draw_left_fitx] = [0,0,255]
             out_img[ploty,draw_right_fitx] = [0,0,255]
     
+    print('draw line on bev end')
+
     return left_fit,right_fit,leftx,rightx,out_img
 
 def warper(img, M):
@@ -226,17 +296,8 @@ def warper(img, M):
 
     return warped
 
-def post_process(prediction_binary_img,origin_img):
+def post_process(prediction_binary_img,origin_img,M,M_inv):
     cv2.imwrite('prediction_binary.png',prediction_binary_img)
-    #2710x3384图上的选点位置　顺序为lt,lb,rb,rt
-    x = [1502, 1421, 1981, 1877]
-    y = [1917, 2050, 2065, 1935]
-    X = [200, 200, 550, 550] #
-    Y = [200, 850, 850, 200]
-    #调整世界坐标系原点的位置使得逆透视变换后车身所在车道大约位于图像中央位置
-    X_offset,Y_offset = 1200,1200
-    X = [e + X_offset for e in X] #
-    Y = [e + Y_offset for e in Y]
 
     #计算逆透视图上每个像素代表的实际物理距离
     LANE_WIDTH=3.5 #需要实际测量
@@ -246,53 +307,50 @@ def post_process(prediction_binary_img,origin_img):
     # print('x方向每个像素代表{:.3f}m'.format(x_m_per_pixel))
     # print('y方向每个像素代表{:.3f}m'.format(y_m_per_pixel))
 
-    src = np.floor(np.float32([[x[0], y[0]], [x[1], y[1]],[x[2], y[2]], [x[3], y[3]]]))
-    dst = np.floor(np.float32([[X[0], Y[0]], [X[1], Y[1]],[X[2], Y[2]], [X[3], Y[3]]]))
-    M = cv2.getPerspectiveTransform(src, dst)
-
     binary_bev_img = warper(prediction_binary_img,M)
-    # cv2.imwrite('prediction_binary_bev.png',binary_bev_img)
+    cv2.imwrite('prediction_binary_bev.png',binary_bev_img)
     try:
         left_fit,right_fit,leftx,rightx,out_img = fit_line(binary_bev_img)
-        # cv2.imwrite('prediction_line_bev.png',out_img)
+        cv2.imwrite('prediction_linefit_onbev.png',out_img)
+        print('draw line on bev end********')
 
         ##在原图上添加距离车道线的距离
-        self_car_pixel=(2285,2697) 
-        car_vec = np.array([self_car_pixel[0],self_car_pixel[1],1])
-        car_vec_in_bird_view = M.dot(car_vec.T)
-        car_vec_in_bird_view /= car_vec_in_bird_view[2]
-        car_x_bev,car_y_bev = car_vec_in_bird_view[0],car_vec_in_bird_view[1]
-        left_x = left_fit[0]*car_y_bev**2 + left_fit[1]*car_y_bev + left_fit[2]
-        left_pixel_distance = car_x_bev - left_x
-        right_x = right_fit[0]*car_y_bev**2 + right_fit[1]*car_y_bev + right_fit[2]
-        right_pixel_distance = right_x - car_x_bev
-        m_bev_every_pixel = LANE_WIDTH/360 #需要实际测量
-        left_distance = m_bev_every_pixel * left_pixel_distance
-        right_distance = m_bev_every_pixel * right_pixel_distance
-        # print('bev视角下距离左车道:{}个pixel,距离右车道:{}个pixel'.format(left_pixel_distance,right_pixel_distance))
-        print('bev视角下距离左车道:{:.2f}m,距离右车道:{:.2f}m'.format(left_distance,right_distance))
+        # self_car_pixel=(2285,2697) 
+        # car_vec = np.array([self_car_pixel[0],self_car_pixel[1],1])
+        # car_vec_in_bird_view = M.dot(car_vec.T)
+        # car_vec_in_bird_view /= car_vec_in_bird_view[2]
+        # car_x_bev,car_y_bev = car_vec_in_bird_view[0],car_vec_in_bird_view[1]
+        # left_x = left_fit[0]*car_y_bev**2 + left_fit[1]*car_y_bev + left_fit[2]
+        # left_pixel_distance = car_x_bev - left_x
+        # right_x = right_fit[0]*car_y_bev**2 + right_fit[1]*car_y_bev + right_fit[2]
+        # right_pixel_distance = right_x - car_x_bev
+        # m_bev_every_pixel = LANE_WIDTH/360 #需要实际测量
+        # left_distance = m_bev_every_pixel * left_pixel_distance
+        # right_distance = m_bev_every_pixel * right_pixel_distance
+        # # print('bev视角下距离左车道:{}个pixel,距离右车道:{}个pixel'.format(left_pixel_distance,right_pixel_distance))
+        # print('bev视角下距离左车道:{:.2f}m,距离右车道:{:.2f}m'.format(left_distance,right_distance))
         
-        str_left_distance = '{:.2f}'.format(left_distance)
-        str_right_distance = '{:.2f}'.format(right_distance)
-        str_distance = 'l:{}m,r:{}m'.format(str_left_distance,str_right_distance)
-        cv2.putText(origin_img, str_distance, self_car_pixel, cv2.FONT_HERSHEY_SIMPLEX, 3,(0, 0, 255), 2, cv2.LINE_AA)
+        # str_left_distance = '{:.2f}'.format(left_distance)
+        # str_right_distance = '{:.2f}'.format(right_distance)
+        # str_distance = 'l:{}m,r:{}m'.format(str_left_distance,str_right_distance)
+        # cv2.putText(origin_img, str_distance, self_car_pixel, cv2.FONT_HERSHEY_SIMPLEX, 3,(0, 0, 255), 2, cv2.LINE_AA)
 
 
         ##绘制了车道线曲线的透视图变换到原图视角
-        M_inv = cv2.getPerspectiveTransform(dst, src)
         line_img = cv2.warpPerspective(out_img, M_inv, (out_img.shape[1], out_img.shape[0]), flags=cv2.INTER_NEAREST) 
-        # cv2.imwrite('prediction_line.png',line_img)
-        
+        cv2.imwrite('prediction_linefit_onfront.png',line_img)
+        print('convert from bev to front')
+
         #叠加到原图
         output = cv2.addWeighted(origin_img, 1, line_img, 2, 0)
-        # cv2.imwrite('fit.png',output)
+        cv2.imwrite('fit.png',output)
         return output
     except:
         print('eeeeeeeeeeeeeeeeeeeee')
         return origin_img
  
 import onnx
-def export_onnx():
+def export_onnx(pt_path,onnx_save_path):
     # change onnx input/output types
     # import onnx
     # onnx_model = onnx.load(ONNX_FILE_PATH)
@@ -303,21 +361,17 @@ def export_onnx():
     # getattr(out_type, "tensor_type", None).elem_type = 10  # fp16
     # onnx.save(onnx_model, ONNX_FILE_PATH)
 
-
-    onnx_save_path='./banqiao.onnx'
+    weigths = torch.load(pt_path) #model input:1280
+   
     output_names = ['output']
     
     # 加载模型 不清楚原因,只能在cpu上处理 torch版本:1.13.1+cu117
     # device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     device = "cpu"
-    # weigths = torch.load('./runs/train/yolov7209/weights/epoch_149.pt')
-    # weigths = torch.load('./runs/train/yolov7218/weights/epoch_079.pt') #model input:640
-    # weigths = torch.load('./runs/train/yolov7221/weights/epoch_059.pt') #model input:1280
-    weigths = torch.load('./runs/train/banqiao5/weights/epoch_099.pt') #model input:1280
     model = weigths['model'].float() #模型转换为fp32
     model = model.to(device)
     _ = model.eval()
-
+ 
     # Input
     img = torch.zeros(1, 3, 960,960) # image size(1,3,320,192) iDetection
     # img = img.half().to(device)
@@ -336,59 +390,51 @@ def export_onnx():
     print(onnx.helper.printable_graph(onnx_model.graph))  # print a human readable model
 
 def main():
-    export_onnx()
-
+    # #原2M相机
     # filelist=[]
-    # # rootdir = '/home/autocore/work_sc/datasets/lane_marking_examples/road02/ColorImage/Record001/Camera 5'
-    # rootdir = '/home/autocore/work_sc/datasets/lane_marking_examples/road02/ColorImage/Record005/Camera 5'
-    # details = rootdir.split('/')
-    # videoname = 'apollo_{}_{}.avi'.format(details[-4],details[-2])
-    # get_file(rootdir,filelist)
-    # save_video(filelist,videoname)
+    # datadir = '/home/autocore/work_sc/datasets/banqiao/20230313/road03/Image'
+    # get_file(datadir,filelist)
+    # videoname = 'banqiao_road.avi'
+    # model_path = './runs/train/banqiao19/weights/epoch_199.pt'
 
-    # filelist=[]
-    # rootdir = '/home/autocore/work_sc/datasets/andemen_street/20221205/out2'
-    # videoname = 'andemen_road.avi'
-    # def sortKey(filename):
-    #     """
-    #     /home/autocore/work_sc/datasets/andemen_street/20221205/out2/1046.jpg
-    #     return 1046
-    #     """
-    #     idx = filename.split('/')[-1][:-4]
-    #     idx = int(idx)      
-    #     return idx 
-    # get_file(rootdir,filelist,sortKey)
-    # print(filelist)
-    # save_video(filelist,videoname)
+    #8M相机
+    filelist=[]
 
-    # filelist=[]
-    # rootdir = '/home/autocore/work_sc/datasets/banqiao'
-    # videoname = 'banqiao.avi'
-    # get_file(rootdir,filelist)
-    # save_video(filelist,videoname)
+    #
+    # datadir = '/home/autocore/work_sc/datasets/banqiao/20230418/road03_resized/Image'
+    # videoname = 'banqiao_cam8m_road03.avi'
+    
+    #高速
+    datadir = '/home/autocore/work_sc/datasets/banqiao/20230418/road02/Image'
+    videoname = 'banqiao_cam8m_road02.avi'
 
+    get_file(datadir,filelist)
+    model_path = './runs/train/banqiao_mix2m8m5/weights/epoch_119.pt'
+    model_input_size=960
+    
+    model = load_model(model_path)
+    save_video(filelist,videoname,model,model_input_size,M,M_inv)
 
-
-main()
-# test_img = '/home/autocore/work_sc/datasets/andemen_street/20221205/out2/111.jpg'
-# test_img = '/home/autocore/work_sc/datasets/lane_marking_examples/road02/ColorImage/Record001/Camera 5/170927_063845516_Camera_5.jpg'
-# test_img = '/home/autocore/work_sc/datasets/lane_marking_examples/road02/ColorImage/Record001/Camera 5/170927_063814371_Camera_5.jpg' 
-# result_img = predict(test_img)
-# print('result_img:{}'.format(result_img.shape))
-# cv2.imwrite('./170927_063814371_Camera_5_prediction.png',result_img)
-
-def test_pipeline():
-    # test_img = '/home/autocore/work_sc/datasets/lane_marking_examples/road02/ColorImage/Record001/Camera 5/170927_063845516_Camera_5.jpg' 
-    # test_img = '/home/autocore/work_sc/datasets/lane_marking_exa# cv2.imwrite('fit.png',output)mples/road02/ColorImage/Record001/Camera 6/170927_063811892_Camera_6.jpg'
-    test_img = '/home/autocore/work_sc/datasets/lane_marking_examples/road02/ColorImage/Record001/Camera 5/170927_063817253_Camera_5.jpg'    
-    result_on_origin_img,result_binary_img = predict(test_img)
+def test_pipeline(test_img,model_path,M,M_inv):    
+    model = load_model(model_path)
+    model_input_size=960
+    
+    result_on_origin_img,result_binary_img = predict(test_img,model,model_input_size)
+    cv2.imwrite('result_binary_img.png',result_binary_img)
     origin_img = cv2.imread(test_img)
-    output = post_process(result_binary_img,origin_img)
+    output = post_process(result_binary_img,origin_img,M,M_inv)
     cv2.imwrite('prediction_fit.png',output)
 
-# test_pipeline()
+# test_pipeline('/mnt/data/work_sc/datasets/banqiao/20230313/road03/Image/1678093910.328726.png','./runs/train/banqiao10/weights/epoch_199.pt',M,M_inv)
+# test_pipeline('/home/autocore/work_sc/datasets/banqiao/20230418/road03_resized/Image/1681827680_709475860.png','./runs/train/banqiao_mix2m8m5/weights/epoch_119.pt',M,M_inv)
+test_pipeline('/home/autocore/work_sc/datasets/banqiao/20230418/road02/1681827555_642832180.png', \
+'./runs/train/banqiao_mix2m8m5/weights/epoch_119.pt',M,M_inv)
+
+#export_onnx('./runs/train/banqiao10/weights/epoch_199.pt','./banqiao.onnx')
+#export_onnx('./runs/train/banqiao_mix2m8m5/weights/epoch_119.pt','./banqiao_mix2m8m.onnx')
 
 
+# main()
 
 
 

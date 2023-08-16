@@ -1,0 +1,12 @@
+__ignore__
+_background_
+white_solid
+white_dotted
+yellow_solid
+yellow_dotted
+forward_arrow
+left_arrow
+right_arrow
+other_arrow
+pedestrian_crossing
+diversion_line

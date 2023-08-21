@@ -655,8 +655,13 @@ class Model(nn.Module):
             y.append(x if m.i in self.save else None)  # save output
 
             if i == self.lane_seg_layer_idx:
-                # m=nn.Sigmoid()
-                lane_seg_head_out=x
+                # sigmoid=nn.Sigmoid()
+                # softmax=nn.Softmax(dim=1) 
+                # # lane_seg_head_out=softmax(sigmoid(x))
+                lane_seg_head_out = x
+
+                # lane_seg_head_out = F.log_softmax(x, dim=1)
+
                 # print('layer {} out shape {}'.format(i,lane_seg_head_out.shape))
             
             # if torch.is_tensor(x):

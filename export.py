@@ -64,4 +64,8 @@ if __name__ == '__main__':
     # export_onnx('/home/sc/work/dlDev/yolov7/runs/test/last.pt','banqiao_8m_736x1280_multicls.onnx',input_size=(736,1280))
     # export_onnx('./runs/train/road0203_color_augment3/weights/epoch_299.pt','banqiao_8m_736x1280_multicls.onnx',input_size=(736,1280))
     
-    export_onnx('./runs/train/road0203_hascarintrain4/weights/epoch_099.pt','banqiao_8m_736x1280_multicls.onnx',input_size=(736,1280))
+    # export_onnx('./runs/train/road0203_hascarintrain4/weights/epoch_099.pt','banqiao_8m_736x1280_multicls.onnx',input_size=(736,1280))
+    # export_onnx('./runs/train/bceloss_3cls4/weights/best.pt','bceloss_3cls4_0818_93.onnx',input_size=(736,1280))
+    # export_onnx('./runs/train/bceloss_3cls_goodlabel/weights/best.pt','bceloss_3cls_goodlabel_0818_93.onnx',input_size=(736,1280))
+
+    export_onnx('./runs/train/bceloss_3cls_goodlabel/weights/best.pt','bceloss_3cls_goodlabel_0818_93_dynamic_input.onnx',input_size=(736,1280),dynamic=True) #hanjing need dynamic input shape

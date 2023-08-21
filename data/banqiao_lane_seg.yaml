@@ -4,8 +4,8 @@
 # download: bash ./scripts/get_coco.sh
 
 # train and val data as 1) directory: path/images/, 2) file: path/images.txt, or 3) list: [path1/images/, path2/images/]
-train: ./banqiao/banqiao_lane_seg.txt  # 
-val: ./banqiao/banqiao_lane_seg.txt   # 
+train: ./banqiao/banqiao_lane_seg_balanced.txt  # 
+val: ./banqiao/banqiao_lane_val.txt   # 
 test: ./banqiao/banqiao_lane_seg_test.txt   # 
 # number of classes
 nc: 1

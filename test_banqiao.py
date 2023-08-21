@@ -52,7 +52,7 @@ def metric_lane_every_cls(lane_pre,lane_targets):
             recall = TP / (TP + FN)     #真正的车道线点,其中多少被预测出来了
 
         # print('TP:{},FP:{},TN:{},FN:{}'.format(TP,FP,TN,FN))
-        # print('precision:{},recall:{}'.format(precision,recall))
+        print('cls:{},precision:{},recall:{}'.format(i,precision,recall))
 
         dice = metric_lane(cls_pre,cls_gt)
         # print('dice:{}'.format(dice))
@@ -61,6 +61,15 @@ def metric_lane_every_cls(lane_pre,lane_targets):
     
     return ret
 
+def check_pre_mask(pre_mask):
+    b,c,h,w = pre_mask.shape
+    for i in range(c):
+        cls_pre = pre_mask[0,i,...] 
+        count = ((cls_pre == 1).sum())
+
+        print('cls:{},count:{}'.format(i,count))
+
+    return
 
 def test(data,
          weights=None,
@@ -152,6 +161,7 @@ def test(data,
     s = ('%12s') % ('Dice@0.7')
     all_pre_probs,all_lane_targets = [],[]
     for batch_i, (img, multi_targets, paths, shapes) in enumerate(tqdm(dataloader, desc=s)):
+        print('-----------------------------',batch_i)
         img = img.to(device, non_blocking=True)
         img = img.half() if half else img.float()  # uint8 to fp16/32
         img /= 255.0  # 0 - 255 to 0.0 - 1.0
@@ -177,9 +187,14 @@ def test(data,
                 f = '{}/valid_batch{}_labels'.format(save_dir,batch_i)
                 Thread(target=plot_images, args=(img, lane_targets, paths, f, names), daemon=True).start()
                 f = '{}/valid_batch{}_predictions'.format(save_dir,batch_i)
-                # print('save prediction:{}'.format(f))
+                print('save prediction:{}'.format(f))
                 pre_prob = torch.sigmoid(lane_seg_head_out)
                 pre_prob_mask = (pre_prob > 0.7)
+
+                # check_pre_mask(pre_prob_mask)
+                # metric_lane_every_cls(pre_prob,lane_targets)
+
+
                 # print('lane_targets shape:{},pre_prob_mask shape:{}'.format(lane_targets.shape,pre_prob_mask.shape))
                 Thread(target=plot_images, args=(img, pre_prob_mask, paths, f, names), daemon=True).start()
             elif is_test_dataset:
@@ -228,7 +243,7 @@ if __name__ == '__main__':
     parser.add_argument('--conf-thres', type=float, default=0.001, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.65, help='IOU threshold for NMS')
     parser.add_argument('--task', default='test', help='train, val, test, speed or study')
-    parser.add_argument('--device', default='0', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--device', default='3', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--single-cls', action='store_true', help='treat as single-class dataset')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--verbose', action='store_true', help='report mAP by class')
@@ -237,7 +252,7 @@ if __name__ == '__main__':
     parser.add_argument('--save-conf', action='store_true', help='save confidences in --save-txt labels')
     parser.add_argument('--save-json', action='store_true', help='save a cocoapi-compatible JSON results file')
     parser.add_argument('--project', default='runs/test', help='save to project/name')
-    parser.add_argument('--name', default='exp', help='save to project/name')
+    parser.add_argument('--name', default='road0203_hascarintrain_recttrain', help='save to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--no-trace', action='store_true', help='don`t trace model')
     parser.add_argument('--v5-metric', action='store_true', help='assume maximum recall as 1.0 in AP calculation')
@@ -248,18 +263,31 @@ if __name__ == '__main__':
     #check_requirements()
 
     if opt.task in ('test'):  # run normally
+        # dice = test_banqiao.test(opt.data,
+        #                     batch_size=batch_size * 2,
+        #                     imgsz=imgsz_test,
+        #                     conf_thres=0.001,
+        #                     iou_thres=0.7,
+        #                     model=attempt_load(m, device).half(),
+        #                     single_cls=opt.single_cls,
+        #                     dataloader=testloader,
+        #                     save_dir=save_dir,
+        #                     save_json=True,
+        #                     plots=True,
+        #                     is_test_dataset=True)
         dice = test(opt.data,
-                            batch_size=1,
-                            imgsz=1280,
-                            conf_thres=0.001,
-                            iou_thres=0.7,
-                            model=None,
-                            single_cls=False,
-                            dataloader=None,
-                            save_dir='./runs/test',
-                            save_json=True,
-                            plots=True,
-                            is_test_dataset=True)
+                    weights=opt.weights,
+                    batch_size=16,
+                    imgsz=1280,
+                    conf_thres=0.001,
+                    iou_thres=0.7,
+                    model=None,
+                    single_cls=False,
+                    dataloader=None,
+                    save_dir='./runs/test',
+                    save_json=True,
+                    plots=True,
+                    is_test_dataset=True)
 
     elif opt.task == 'speed':  # speed benchmarks
         for w in opt.weights:

@@ -515,38 +515,43 @@ class ComputeLoss:
         llane = torch.zeros(1, device=device)
         if withLaneLoss:
             b,h,w,c = lane_targets.shape
-            cls_pos_weight = (self.seg_pw * self.seg_pw_cls).tolist()
-            
-            pos_weight = torch.tensor(cls_pos_weight,device=device).view(3,1,1)
+            # print('---------------------{}'.format(self.seg_pw))
+            cls_pos_weight = (self.seg_pw * self.seg_pw_cls).tolist()      
+            pos_weight = torch.tensor(cls_pos_weight,device=device).view(len(self.seg_pw_cls),1,1)
             self.BCEseg = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-            # if self.g > 0:
-            #     self.BCEseg = FocalLoss(self.BCEseg,self.g) #tested on banqiao,will reduce recall
-
-            llane += self.BCEseg(lane_pre,lane_targets)
-            
+            if self.g > 0:
+                self.BCEseg = FocalLoss(self.BCEseg,self.g) #tested on banqiao,will reduce recall
             # print('lane_pre shape:{},lane_targets shape:{},llane:{}'.format(lane_pre.shape,lane_targets.shape,llane))
+            llane += self.BCEseg(lane_pre,lane_targets)
+            lane_pre_prob = torch.sigmoid(lane_pre) #将输出转换为概率
+
+            # cls_weight = torch.tensor([1,1000,1000,1000],device=device)
+            # crossloss=nn.CrossEntropyLoss(weight=cls_weight)
+            # llane += crossloss(lane_pre,lane_targets)
+            # lane_pre_prob = torch.softmax(lane_pre,dim=1) #将输出转换为概率
 
             loss = llane
             # print('loss:{},lbox:{},llane:{}'.format(loss.shape,lbox.shape,llane.shape))
 
-            #
-            lane_pre_prob = torch.sigmoid(lane_pre)
-            # cls_details = self.metric_lane_every_cls(lane_pre_prob,lane_targets)
-            cls_details = []
+            # cls_metric_details = self.metric_lane_every_cls(lane_pre_prob,lane_targets)
+            cls_metric_details = []
             dice = self.metric_lane(lane_pre_prob,lane_targets)
 
             #对车道线部分和非车道线部分分别计算loss
-            lane_point_loss,unlane_point_loss = self.check_loss(lane_pre_prob,lane_targets)
+            lane_point_loss,unlane_point_loss,cls_loss_details = self.check_loss(lane_pre_prob,lane_targets)
 
-            lane_deatils = (llane.detach().item(),lane_point_loss.detach().item(),unlane_point_loss.detach().item(),dice,cls_details)
+            lane_deatils = (llane.detach().item(),lane_point_loss.detach().item(),unlane_point_loss.detach().item(),dice,cls_metric_details,cls_loss_details,cls_pos_weight)
         # print('loss:{},lbox:{}'.format(loss.shape,lbox.shape))
         return loss * bs, torch.cat((lbox, lobj, lcls, loss)).detach(),lane_deatils
 
     def check_loss(self,lane_pre_prob,lane_targets):
         """
         分别计算目标(各种类型的线,实线,虚线,导流区...)和背景(除目标之外的所有像素)的loss
+        lane_targets:[c,h,w] 其中c和要识别的前景类别数量一致.
         """
         bceloss = nn.BCELoss()
+
+        cls_loss_details = []
 
         lane_mask = (lane_targets==1)  
         unlane_mask = ~lane_mask
@@ -563,7 +568,33 @@ class ComputeLoss:
             lane_pre_justunlane = lane_pre_justunlane.type(torch.float)
             unlane_loss = bceloss(lane_pre_justunlane,lane_targets)
 
-        return lane_loss,unlane_loss
+            b,c,h,w = lane_targets.shape
+            for i in range(c):
+                cls_pre = lane_pre_prob[:,i,...]
+                cls_gt = lane_targets[:,i,...].type_as(cls_pre)
+
+                cls_loss = bceloss(cls_pre,cls_gt)
+
+                pos_mask = (cls_gt==1) 
+                neg_mask = ~pos_mask
+
+                cls_pre_pos = torch.zeros_like(cls_pre)
+                cls_pre_pos[pos_mask] = cls_pre[pos_mask]
+                cls_gt_pos = torch.zeros_like(cls_gt)
+                cls_gt_pos[pos_mask] = cls_gt[pos_mask]
+                cls_pos_loss = bceloss(cls_pre_pos,cls_gt_pos)
+
+                cls_pre_neg = torch.zeros_like(cls_pre)
+                cls_pre_neg[neg_mask] = cls_pre[neg_mask]
+                cls_gt_neg = torch.zeros_like(cls_gt)
+                cls_gt_neg[neg_mask] = cls_gt[neg_mask]
+                cls_neg_loss = bceloss(cls_pre_neg,cls_gt_neg)
+
+                # print('cls:{},cls_loss:{},cls_pos_loss:{},cls_neg_loss:{}'.format(i,cls_loss,cls_pos_loss,cls_neg_loss))
+
+                cls_loss_details.append([cls_loss,cls_pos_loss,cls_neg_loss])
+
+        return lane_loss,unlane_loss,cls_loss_details
         
 
     def metric_lane_every_cls(self,lane_pre,lane_targets):

@@ -1,6 +1,6 @@
 # parameters
 nc: 1  # number of classes
-lane_cls_num: 3
+lane_cls_num: 3 #需要和banqiao_dataset.py中cls_names长度保持一致
 depth_multiple: 1.0  # model depth multiple
 width_multiple: 1.0  # layer channel multiple
 lane_seg_layer_idx: 109
@@ -143,7 +143,7 @@ head:
    [ -1, 1,nn.Upsample, [None, 2, 'nearest']],  # [32,h/2,w/2]
    [ -1, 1,Conv, [16, 3, 1]],                   # [16,h/2,w/2]
    [ -1, 1,nn.Upsample, [None, 2, 'nearest']],  # [16,h,w]
-   [ -1, 1,Conv, [lane_cls_num, 3, 1]], # 109              # [2,h,w]
+   [ -1, 1,Conv, [lane_cls_num, 3, 1]], # 109              # [lane_cls_num,h,w]
 
    [75, 1, RepConv, [256, 3, 1]],  #110
    [88, 1, RepConv, [512, 3, 1]],  #111

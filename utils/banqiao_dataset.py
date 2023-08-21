@@ -5,6 +5,7 @@ import numpy as np
 
 #bgr order
 COLOR_MAP = {
+    'background' : (0,0,0),
     'white_solid' : (0,0,128),
     'white_dotted' : (0,128,0),
     'forward_arrow' : (128,0,128),
@@ -13,7 +14,10 @@ COLOR_MAP = {
     'right_arrow' : (128,128,128)
 }
 
+# cls_names = ['background','white_solid','white_dotted','forward_arrow'] #需要加载到label的类别. 长度需要和cfg/multihead_multicls.yaml中的lane_cls_num保持一致.
+
 cls_names = ['white_solid','white_dotted','forward_arrow'] #需要加载到label的类别. 长度需要和cfg/multihead_multicls.yaml中的lane_cls_num保持一致.
+
 
 def imgpath2labelpath(img_path):
     label_path = img_path.replace('Image','Label/SegmentationClassPNG')
@@ -21,6 +25,7 @@ def imgpath2labelpath(img_path):
 
 def load_label(label_path):
     # print(label_path)
+
     line_img = cv2.imread(label_path)
 
     nm_cls = len(cls_names)
@@ -41,6 +46,9 @@ def load_label(label_path):
     return mask
 
 def load_label_letterbox(label_path,shape,scaleup):
+    # if '1684228583_251883973.png' in label_path:
+    #     print(label_path)
+
     line_img = cv2.imread(label_path)
     # print('line_img shape:{},shape:{}'.format(line_img.shape,shape))
     line_img, ratio, pad = letterbox(line_img, shape, auto=False, scaleup=scaleup)

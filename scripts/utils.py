@@ -1,4 +1,5 @@
 
+#coding=utf-8
 import os
 import os.path
 
@@ -14,7 +15,7 @@ name_list = list(a)
 
 def sort_by_time(file_name):
     """
-    文件名是数字｀
+    filename is numbers
     """
     file_name_num = file_name[:-4]
     nums = file_name_num.split('_')
@@ -108,6 +109,7 @@ def change_colcor_road03():
 
 
 #把原先标注的road03的直路图片拷贝过来
+#1681827664_142819924.png之后的数据都可以认为是正确的标注,只有实线虚线.
 def copy_road03():
     srcdir = '/mnt/data/public_datasets/banqiao/20230418/road03/Image'
     dstdir = '/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Image'
@@ -134,8 +136,6 @@ def copy_road03():
                     pass
 
 
-
-
 if __name__ == '__main__':
     # copy_label('/mnt/data/public_datasets/banqiao/20230418/road02/Image','/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Image')
     # copy_label('/mnt/data/public_datasets/banqiao/20230418/to_be_labeled/0','/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Image')
@@ -146,8 +146,9 @@ if __name__ == '__main__':
     # copy_label('/mnt/data/public_datasets/banqiao/20230418/to_be_labeled/5','/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Image')
     # copy_label('/mnt/data/public_datasets/banqiao/20230418/to_be_labeled/6','/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Image')
 
+    #!!!注意手动把txt文件中的图片数量补充到batch_size的整数倍
     gen_traintxt('/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Image', \
-                 '/mnt/data/sc/yolov7/banqiao/banqiao_lane_seg.txt')
+                 '/mnt/data/sc/yolov7/banqiao/banqiao_lane_seg_balanced.txt')
 
     # gen_testtxt('/mnt/data/public_datasets/banqiao/test/cam0', \
     #              '/mnt/data/sc/yolov7/banqiao/banqiao_lane_seg_test.txt')

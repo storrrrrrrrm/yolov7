@@ -146,6 +146,9 @@ def plot_images(images, targets, paths=None, fname='images.jpg', names=None, max
         # print('type(img):{}'.format(type(new_img)))
 
         for j,cls in enumerate(cls_names): 
+            if (cls != 'white_solid') and (cls != 'white_dotted'): #只绘制实线虚线
+                continue
+
             color = COLOR_MAP[cls]
 
             mask = targets[i,j,...]

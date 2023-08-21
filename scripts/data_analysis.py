@@ -94,4 +94,6 @@ if __name__ == '__main__':
     # img_path = '/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Label/SegmentationClassPNG/1684228583_251883973.png'
     # analysis(img_path)
 
-    analysis_traindataset('/mnt/data/sc/yolov7/banqiao/banqiao_lane_seg.txt')
+    analysis_traindataset('/mnt/data/sc/yolov7/banqiao/banqiao_lane_seg_balanced.txt')
+    # analysis_traindataset('/mnt/data/sc/yolov7/banqiao/banqiao_lane_seg.txt')
+    # analysis_traindataset('/mnt/data/sc/yolov7/banqiao/banqiao_lane_val.txt')

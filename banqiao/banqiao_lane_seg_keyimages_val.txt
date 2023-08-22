@@ -1,0 +1,10 @@
+/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Image/1681827659_42823188.png
+/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Image/1681827660_9489204.png
+/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Image/1681827661_76155028.png
+/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Image/1684228561_618563941.png
+/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Image/1684228562_818563013.png
+/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Image/1684228574_718555333.png
+/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Image/1684228576_885220645.png
+/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Image/1684228578_085219877.png
+/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Image/1684228580_518551525.png
+/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Image/1684228583_251883973.png

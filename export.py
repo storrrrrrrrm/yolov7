@@ -68,4 +68,6 @@ if __name__ == '__main__':
     # export_onnx('./runs/train/bceloss_3cls4/weights/best.pt','bceloss_3cls4_0818_93.onnx',input_size=(736,1280))
     # export_onnx('./runs/train/bceloss_3cls_goodlabel/weights/best.pt','bceloss_3cls_goodlabel_0818_93.onnx',input_size=(736,1280))
 
-    export_onnx('./runs/train/bceloss_3cls_goodlabel/weights/best.pt','bceloss_3cls_goodlabel_0818_93_dynamic_input.onnx',input_size=(736,1280),dynamic=True) #hanjing need dynamic input shape
+    # export_onnx('./runs/train/bceloss_3cls_goodlabel/weights/best.pt','bceloss_3cls_goodlabel_0818_93_dynamic_input.onnx',input_size=(736,1280),dynamic=True) #hanjing need dynamic input shape
+
+    export_onnx('./runs/train/bceloss_3cls13/weights/best.pt','./saved_onnx/bceloss_3cls13/bceloss_3cls13_0822_91.onnx',input_size=(736,1280)) 

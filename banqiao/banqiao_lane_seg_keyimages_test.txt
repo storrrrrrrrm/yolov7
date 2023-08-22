@@ -1,0 +1,6 @@
+/mnt/data/public_datasets/banqiao/test/cam0/1684228558_985232101.png
+/mnt/data/public_datasets/banqiao/test/cam0/1684228560_451897157.png
+/mnt/data/public_datasets/banqiao/test/cam0/1684228573_518556229.png
+/mnt/data/public_datasets/banqiao/test/cam0/1684228575_018555333.png
+/mnt/data/public_datasets/banqiao/test/cam0/1684228576_585221061.png
+

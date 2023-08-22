@@ -41,12 +41,13 @@ def gen_traintxt(rootdir,savetxt):
             if os.path.exists(label_img_path):
                 f.writelines('{}{}'.format(img_path,'\n'))
 
-def gen_testtxt(rootdir,savetxt):
+def gen_testtxt(rootdir,savetxt,div=1):
     filelist=[]
     get_file(rootdir,filelist,sort_by_time)
     with open(savetxt,'w+') as f:
-        for img_path in filelist:
-            f.writelines('{}{}'.format(img_path,'\n'))
+        for i,img_path in enumerate(filelist):
+            if (i % div == 0):
+                f.writelines('{}{}'.format(img_path,'\n'))
 
 
 def remove_no_label(rootdir):
@@ -147,11 +148,14 @@ if __name__ == '__main__':
     # copy_label('/mnt/data/public_datasets/banqiao/20230418/to_be_labeled/6','/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Image')
 
     #!!!注意手动把txt文件中的图片数量补充到batch_size的整数倍
-    gen_traintxt('/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Image', \
-                 '/mnt/data/sc/yolov7/banqiao/banqiao_lane_seg_balanced.txt')
+    # gen_traintxt('/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Image', \
+    #              '/mnt/data/sc/yolov7/banqiao/banqiao_lane_seg_balanced.txt')
 
     # gen_testtxt('/mnt/data/public_datasets/banqiao/test/cam0', \
     #              '/mnt/data/sc/yolov7/banqiao/banqiao_lane_seg_test.txt')
+
+    gen_testtxt('/mnt/data/public_datasets/banqiao/test/cam0', \
+                 '/mnt/data/sc/yolov7/banqiao/banqiao_lane_seg_keyimages_test.txt',div=10)
 
     # change_colcor_road03()
     # copy_road03()

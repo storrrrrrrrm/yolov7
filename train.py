@@ -79,6 +79,12 @@ def train(hyp, opt, device, tb_writer=None):
         s =  ('%10s' * 10) % ('dice', 'p1', 'r1', 'dice1','p2', 'r2', 'dice2','p3', 'r3', 'dice3')
         f.write(s+'\n')  
 
+    train_results_file = save_dir / 'train_results.txt'
+    with open(train_results_file, 'a') as f:
+        s =  ('%10s' * 10) % ('epoch','cls_loss', 'posloss', 'negloss', 'cls_loss', 'posloss', 'negloss','cls_loss', 'posloss', 'negloss')
+        f.write(s+'\n')  
+
+
     # Save run settings
     with open(save_dir / 'hyp.yaml', 'w') as f:
         yaml.dump(hyp, f, sort_keys=False)
@@ -462,6 +468,16 @@ def train(hyp, opt, device, tb_writer=None):
                     '%g/%g' % (epoch, epochs - 1), lane_details[0],lane_details[1],lane_details[2],lane_details[3],imgs.shape[-1])
                 pbar.set_description(s)
 
+            with open(train_results_file, 'a') as f:
+                cls_metric_details,cls_loss_details,cls_pos_weight = lane_details[4],lane_details[5],lane_details[6]
+
+                s = ('%10s') % ( '%g' % (epoch) )
+                for detail in cls_loss_details:
+                    cls_loss,cls_pos_loss,cls_neg_loss = detail
+                    s = s + ('%10.4g' * 3 ) % (cls_loss,cls_pos_loss,cls_neg_loss)
+                f.write(s+'\n')  
+
+
             # end batch ------------------------------------------------------------------------------------------------
         # end epoch ----------------------------------------------------------------------------------------------------
 
@@ -559,7 +575,7 @@ def train(hyp, opt, device, tb_writer=None):
             dice = test_banqiao.test(opt.data,
                                         batch_size=batch_size * 2,
                                         imgsz=imgsz_test,
-                                        conf_thres=0.001,
+                                        conf_thres=0.7,
                                         iou_thres=0.7,
                                         model=attempt_load(m, device).half(),
                                         single_cls=opt.single_cls,
@@ -667,7 +683,7 @@ if __name__ == '__main__':
     parser.add_argument('--cfg', type=str, default='cfg/multihead_multicls.yaml', help='model.yaml path')
     parser.add_argument('--data', type=str, default='data/banqiao_lane_seg.yaml', help='data.yaml path')
     parser.add_argument('--hyp', type=str, default='data/hyp.lane_banqiao.yaml', help='hyperparameters path')
-    parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--epochs', type=int, default=180)
     parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs')
     parser.add_argument('--img-size', nargs='+', type=int, default=[1280, 1280], help='[train, test] image sizes')
     parser.add_argument('--rect', action='store_false', help='rectangular training')
@@ -688,7 +704,7 @@ if __name__ == '__main__':
     parser.add_argument('--workers', type=int, default=8, help='maximum number of dataloader workers')
     parser.add_argument('--project', default='runs/train', help='save to project/name')
     parser.add_argument('--entity', default=None, help='W&B entity')
-    parser.add_argument('--name', default='road0203_hascarintrain_recttrain', help='save to project/name')
+    parser.add_argument('--name', default='bceloss_3cls', help='save to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--quad', action='store_true', help='quad dataloader')
     parser.add_argument('--linear-lr', action='store_true', help='linear LR')

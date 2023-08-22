@@ -88,8 +88,6 @@ def analysis_traindataset(traintxt_path):
     return infos
 
 
-
-
 if __name__ == '__main__':
     # img_path = '/mnt/data/public_datasets/banqiao/banqiao_lane_seg/Label/SegmentationClassPNG/1684228583_251883973.png'
     # analysis(img_path)

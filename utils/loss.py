@@ -518,7 +518,8 @@ class ComputeLoss:
             # print('---------------------{}'.format(self.seg_pw))
             cls_pos_weight = (self.seg_pw * self.seg_pw_cls).tolist()      
             pos_weight = torch.tensor(cls_pos_weight,device=device).view(len(self.seg_pw_cls),1,1)
-            self.BCEseg = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+            weight = torch.tensor([[1, 2, 2]] * b,device=device).view(b, 3, 1, 1) # bs为批次大小 3个类别的loss权重1:2:2
+            self.BCEseg = nn.BCEWithLogitsLoss(pos_weight=pos_weight,weight=weight)
             if self.g > 0:
                 self.BCEseg = FocalLoss(self.BCEseg,self.g) #tested on banqiao,will reduce recall
             # print('lane_pre shape:{},lane_targets shape:{},llane:{}'.format(lane_pre.shape,lane_targets.shape,llane))
@@ -540,7 +541,13 @@ class ComputeLoss:
             #对车道线部分和非车道线部分分别计算loss
             lane_point_loss,unlane_point_loss,cls_loss_details = self.check_loss(lane_pre_prob,lane_targets)
 
-            lane_deatils = (llane.detach().item(),lane_point_loss.detach().item(),unlane_point_loss.detach().item(),dice,cls_metric_details,cls_loss_details,cls_pos_weight)
+            lane_deatils = (llane.detach().item(),
+                            lane_point_loss.detach().item(),
+                            unlane_point_loss.detach().item(),
+                            dice,
+                            cls_metric_details,
+                            cls_loss_details,
+                            cls_pos_weight)
         # print('loss:{},lbox:{}'.format(loss.shape,lbox.shape))
         return loss * bs, torch.cat((lbox, lobj, lcls, loss)).detach(),lane_deatils
 

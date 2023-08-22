@@ -29,7 +29,7 @@ mixup: 0.0  # image mixup (probability)
 copy_paste: 0.0  # image copy paste (probability)
 paste_in: 0.0  # image copy paste (probability), use 0 for faster training
 loss_ota: 0 # use ComputeLossOTA, use 0 for faster training
-seg_pw: 1.0  # lane seg BCELoss positive_weight
+seg_pw: 1.0  # lane seg BCELoss positive_weight. 废弃不用.
 # exponential_decay: 200,100,1 #正样本权重从200衰减到1,共计100epoch
 exponential_decay: 1000,100,5 #正样本权重从200衰减到1,共计100epoch
-seg_pw_cls: 1.0,1.5,1.5 #用于平衡不同类别的loss. 需要和banqiao_dataset.py中cls_names数量一致.
+seg_pw_cls: 1.0,1.5,1.5 #不同的类别使用不同的正样本权重.真正的正样本权重为exponential_decay的权重 * seg_pw_cls. 需要和banqiao_dataset.py中cls_names数量一致.

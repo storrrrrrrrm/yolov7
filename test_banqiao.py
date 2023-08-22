@@ -75,7 +75,7 @@ def test(data,
          weights=None,
          batch_size=32,
          imgsz=640,
-         conf_thres=0.001,
+         conf_thres=0.7,
          iou_thres=0.6,  # for NMS
          save_json=False,
          single_cls=False,
@@ -189,7 +189,7 @@ def test(data,
                 f = '{}/valid_batch{}_predictions'.format(save_dir,batch_i)
                 print('save prediction:{}'.format(f))
                 pre_prob = torch.sigmoid(lane_seg_head_out)
-                pre_prob_mask = (pre_prob > 0.7)
+                pre_prob_mask = (pre_prob > conf_thres)
 
                 # check_pre_mask(pre_prob_mask)
                 # metric_lane_every_cls(pre_prob,lane_targets)
@@ -201,7 +201,7 @@ def test(data,
                 f = '{}/test_batch{}_predictions'.format(save_dir,batch_i)
                 # print('save prediction:{}'.format(f))
                 pre_prob = torch.sigmoid(lane_seg_head_out)
-                pre_prob_mask = (pre_prob > 0.7)
+                pre_prob_mask = (pre_prob > conf_thres)
                 # print('lane_targets shape:{},pre_prob_mask shape:{}'.format(lane_targets.shape,pre_prob_mask.shape))
                 Thread(target=plot_images, args=(img, pre_prob_mask, paths, f, names), daemon=True).start()
             else:
@@ -240,7 +240,7 @@ if __name__ == '__main__':
     parser.add_argument('--data', type=str, default='data/banqiao_lane_seg.yaml', help='*.data path')
     parser.add_argument('--batch-size', type=int, default=1, help='size of each image batch')
     parser.add_argument('--img-size', type=int, default=1280, help='inference size (pixels)')
-    parser.add_argument('--conf-thres', type=float, default=0.001, help='object confidence threshold')
+    parser.add_argument('--conf-thres', type=float, default=0.85, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.65, help='IOU threshold for NMS')
     parser.add_argument('--task', default='test', help='train, val, test, speed or study')
     parser.add_argument('--device', default='3', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
@@ -279,7 +279,7 @@ if __name__ == '__main__':
                     weights=opt.weights,
                     batch_size=16,
                     imgsz=1280,
-                    conf_thres=0.001,
+                    conf_thres=opt.conf_thres,
                     iou_thres=0.7,
                     model=None,
                     single_cls=False,
